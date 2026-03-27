@@ -2,8 +2,10 @@
 
 import argparse
 import asyncio
+import json
 import shutil
 import signal
+import string
 import sys
 from datetime import datetime, timedelta
 from importlib.metadata import version
@@ -13,12 +15,15 @@ import shtab
 
 from pytr.account import login
 from pytr.alarms import Alarms
+from pytr.conv_pp import Converter
 from pytr.details import Details
 from pytr.dl import DL
 from pytr.event import Event
 from pytr.portfolio import PORTFOLIO_COLUMNS, Portfolio
 from pytr.timeline import Timeline
 from pytr.transactions import SUPPORTED_LANGUAGES, TransactionExporter
+from pytr.trdl_pp import Downloader as PPDownloader
+from pytr.trdl_pp import get_timestamp
 from pytr.utils import check_version, get_logger
 
 
@@ -382,6 +387,75 @@ def get_main_parser():
         nargs="?",
     )
 
+    # export_pp
+    info = "Export TR timeline to Portfolio Performance CSV format (payments.csv / orders.csv)"
+    parser_export_pp = parser_cmd.add_parser(
+        "export_pp",
+        formatter_class=formatter,
+        parents=[parser_login_args],
+        help=info,
+        description=info,
+    )
+    parser_export_pp.add_argument(
+        "-D",
+        "--dir",
+        type=Path,
+        default=None,
+        help="Main output directory. Sets default paths for events.json, payments.csv, and orders.csv (does NOT trigger document download; use -F for that).",
+    )
+    parser_export_pp.add_argument(
+        "-E",
+        "--events-file",
+        dest="events_file",
+        type=Path,
+        default=None,
+        help="Write raw events to this JSON file.",
+    )
+    parser_export_pp.add_argument(
+        "-P",
+        "--payments-file",
+        dest="payments_file",
+        type=Path,
+        default=None,
+        help="Write payments to this CSV file.",
+    )
+    parser_export_pp.add_argument(
+        "-O",
+        "--orders-file",
+        dest="orders_file",
+        type=Path,
+        default=None,
+        help="Write orders to this CSV file.",
+    )
+    parser_export_pp.add_argument(
+        "-F",
+        "--docs-dir",
+        dest="docs_dir",
+        type=Path,
+        default=None,
+        help="Download PDF documents into this directory (a timestamped subfolder is created automatically).",
+    )
+    parser_export_pp.add_argument(
+        "--workers",
+        help="Number of workers for parallel downloading",
+        default=8,
+        type=int,
+    )
+    parser_export_pp.add_argument(
+        "--last_days",
+        help="Include data from the last N days (0 = include all days)",
+        metavar="DAYS",
+        default=0,
+        type=int,
+    )
+    parser_export_pp.add_argument(
+        "--days_until",
+        help="Include data up to N days ago (0 = include all days)",
+        metavar="DAYS",
+        default=0,
+        type=int,
+    )
+
     # completion
     info = "Print shell tab completion"
     parser_completion = parser_cmd.add_parser(
@@ -573,6 +647,86 @@ def main():
         except ValueError as e:
             print(e)
             return -1
+    elif args.command == "export_pp":
+        # Apply --dir defaults
+        if args.dir:
+            if not args.events_file:
+                args.events_file = args.dir / "events.json"
+            if not args.payments_file:
+                args.payments_file = args.dir / "payments.csv"
+            if not args.orders_file:
+                args.orders_file = args.dir / "orders.csv"
+
+        if not any((args.docs_dir, args.events_file, args.payments_file, args.orders_file)):
+            print("No output target selected. Use -D <dir> or specify individual output files (-E/-P/-O/-F).")
+            return -1
+
+        tr = login(
+            phone_no=args.phone_no,
+            pin=args.pin,
+            web=not args.applogin,
+            store_credentials=args.store_credentials,
+            waf_token=args.waf_token,
+        )
+
+        output_path = args.dir if args.dir else Path(".")
+        tl = Timeline(tr, output_path, not_before, not_after)
+        asyncio.run(tl.tl_loop())
+        events = tl.events
+
+        if args.docs_dir:
+            docs_dir = Path(args.docs_dir) / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            docs_dir.mkdir(parents=True, exist_ok=True)
+            log.info(f"Downloading documents into '{docs_dir}'")
+            dl = PPDownloader(headers=tr._default_headers_web, max_workers=args.workers)
+            files = []
+            for event in events:
+                if "details" in event:
+                    for section in event["details"]["sections"]:
+                        if section["type"] == "documents":
+                            for doc in section["data"]:
+                                try:
+                                    dt = datetime.strptime(doc["detail"], "%d.%m.%Y")
+                                except (ValueError, KeyError, TypeError):
+                                    dt = get_timestamp(event["timestamp"])
+                                doc_url = doc["action"]["payload"]
+                                if isinstance(doc_url, dict):
+                                    doc_url = f"https://api.traderepublic.com/{doc_url['path']}"
+                                try:
+                                    ext = doc_url[: doc_url.index("?")]
+                                    ext = ext[ext.rindex(".") + 1 :].lower()
+                                except ValueError:
+                                    ext = "pdf"
+                                event_type = event["eventType"]
+                                eid = "" if event_type.upper() == "TAX_YEAR_END_REPORT" else f" - {doc['id']}"
+                                rel_path = (
+                                    Path(string.capwords(event_type, "_"))
+                                    / f"{dt:%Y-%m-%d} - {doc['title']}{eid}.{ext}"
+                                )
+                                files.append((doc_url, rel_path))
+            num = len(files)
+            skipped = 0
+            for n, (doc_url, rel_path) in enumerate(reversed(files), start=1):
+                full_path = docs_dir / rel_path
+                if full_path.exists():
+                    skipped += 1
+                    log.debug(f"Skipping {n}/{num}: '{rel_path}'")
+                else:
+                    log.info(f"Downloading {n}/{num}: '{rel_path}'")
+                    dl.dl(doc_url, full_path)
+            dl.wait()
+            if num - skipped:
+                log.info(f"Downloaded {num - skipped} files.")
+            if skipped:
+                log.info(f"Skipped {skipped} files (already present).")
+
+        if args.payments_file or args.orders_file:
+            Converter().convert(events, args.payments_file, args.orders_file)
+
+        if args.events_file:
+            with open(args.events_file, "w") as fh:
+                json.dump(events, fh, indent=2)
+
     elif args.version:
         installed_version = version("pytr")
         print(installed_version)

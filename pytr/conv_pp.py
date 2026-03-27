@@ -1,0 +1,555 @@
+"""
+conv_pp.py — Ported from pytrpp's conv.py.
+
+Converts raw TR timeline events into typed Python objects and exports them
+to Portfolio Performance-compatible CSV files (payments.csv, orders.csv).
+"""
+
+import json
+import re
+from copy import deepcopy
+from datetime import datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import Any, Callable
+
+from pytr.trdl_pp import get_timestamp
+
+RE_ISIN = re.compile(r"^[A-Z]{2}-?[\dA-Z]{9}-?\d$")
+
+
+class Amount:
+    def __init__(self, value: str | Decimal, currency: str, fraction_digits: int | None = None) -> None:
+        self.value = Decimal(value)
+        if fraction_digits is not None:
+            self.value = self.value.quantize(Decimal('1.' + '0' * int(fraction_digits)))
+        self.currency = currency
+
+    def __format__(self, format_spec: str):
+        if format_spec == ',':
+            return str(self.value).replace('.', ',')
+        elif format_spec == '.':
+            return str(self.value)
+        else:
+            return format(self.value, format_spec)
+
+    def __repr__(self):
+        return f'{repr(self.value)} {self.currency}'
+
+    @classmethod
+    def zero(cls, currency='EUR'):
+        return cls(Decimal('0.00'), currency)
+
+    @classmethod
+    def from_text(cls, text: str):
+        CURRENCIES = '€$'
+        WHITESPACE = '  \t'
+        if text == 'Gratis':
+            return cls.zero()
+
+        # Remove currency
+        if text[0] in CURRENCIES:
+            currency = text[0]
+            text = text[1:]
+        elif text[-1] in CURRENCIES:
+            currency = text[-1]
+            text = text[:-1]
+
+        if text[0] in '+-':
+            text = text[1:]
+
+        text = text.strip(WHITESPACE)
+
+        # Adapted from code by savek-cc (https://github.com/MartinScharrer/pytrpp/issues/2):
+        if '.' in text and ',' in text:
+            # Remove any dots (the thousand separators)
+            text = text.replace('.', '')
+            # Replace the comma (decimal separator) with a dot.
+            text = text.replace(',', '.')
+        # If only a comma exists, assume it is the decimal separator.
+        elif ',' in text:
+            text = text.replace(',', '.')
+        # If only a dot exists or no separator exists, assume it's in the correct format.
+        currency = {'€': 'EUR', '$': 'USD'}.get(currency, ascii(currency))
+        return Amount(text, currency)
+
+
+def amount(event: dict) -> 'Amount | None':
+    """Extract amount from event."""
+    try:
+        amount_dict = event['amount']
+        return Amount(amount_dict['value'], amount_dict['currency'], amount_dict['fractionDigits'])
+    except KeyError:
+        return None
+
+
+class Event:
+    pass
+
+
+class TransactionEvent(Event):
+
+    def get_isin(self, event: dict):
+        try:
+            sections = event['details']['sections']
+            for section in sections:
+                action = section.get('action')
+                if action:
+                    if action['type'] == 'instrumentDetail':
+                        return action['payload']
+        except KeyError:
+            pass
+        # Otherwise try to extract it from the icon
+        try:
+            icon = event['icon'].split('/', 3)[1]
+            if RE_ISIN.match(icon):
+                return icon
+        except (TypeError, ValueError):
+            pass
+        return ''
+
+    def get_transaction(self, event: dict):
+        transaction = {}
+        try:
+            sections = event['details']['sections']
+            for section in sections:
+                if section.get('title') in ('Transaktion', 'Geschäft'):
+                    for data in section['data']:
+                        title = data['title']
+                        text = data['detail']['text']
+                        if title == 'Aktion':
+                            text = Decimal(text)
+                        elif title in ('Gebühr', 'Steuern'):
+                            if text.lower() == 'kostenlos':
+                                text = Amount.zero()
+                            else:
+                                text = Amount.from_text(text)
+                        elif title in ('Aktienkurs', 'Anteilspreis'):
+                            title = 'Preis'
+                            text = Amount.from_text(text)
+                        elif title in ('Gesamt', 'Tilgung', 'Coupon Zahlung'):
+                            text = Amount.from_text(text)
+                        elif title in ('Anteile', 'Aktien'):
+                            title = 'Anteile'
+                            text = Decimal(text.replace(',', '.'))
+                        elif title == 'Dividende pro Aktie':
+                            title = 'Dividende je Aktie'
+                        transaction[title] = text
+        except KeyError:
+            pass
+        return transaction
+
+    def get_section(self, event: dict, *section_titles: str) -> dict | None:
+        try:
+            sections = event['details']['sections']
+            for section in sections:
+                if section.get('title') in section_titles:
+                    return {data['title']: data['detail']['text'] for data in section['data']}
+        except KeyError:
+            return None
+
+
+class Unknown(Event):
+    def __init__(self, event: dict):
+        self.event = deepcopy(event)
+
+    def __repr__(self):
+        return f'Unknown({self.event["eventType"]})'
+
+
+class Ignore(Event):
+    def __init__(self, event: dict):
+        self.event = deepcopy(event)
+
+    def __repr__(self):
+        return f'Ignore({self.event["eventType"]})'
+
+
+class Investment(TransactionEvent):
+    note: str
+    type: str
+
+    TYPES = {
+        'Round up': 'Kauf',
+        'Sparplan': 'Kauf',
+        'Saveback': 'Einlieferung',
+        'Wertpapiertransfer': 'Einlieferung',
+        'Kauf': 'Kauf',
+        'Verkauf': 'Verkauf',
+    }
+
+    def __init__(self, event: dict):
+        self.dt: datetime = get_timestamp(event['timestamp'])
+        self.value: Amount = amount(event)
+        if event.get('title', '').startswith('Anleihe'):
+            self.note = 'Anleihe'
+        self.isin: str = self.get_isin(event)
+        transaction = self.get_transaction(event)
+        self.price = transaction.get('Preis')
+        self.taxes = transaction.get('Steuern', Amount.zero())
+        self.costs = transaction.get('Gebühr', Amount.zero())
+        if self.value is None:
+            self.value = transaction.get('Gesamt', Amount.zero())
+        overview = self.get_section(event, 'Übersicht')
+        for t in ('Asset', 'Anteil'):
+            self.name = overview.get(t)
+            if self.name is not None:
+                break
+        try:
+            self.type
+        except AttributeError:
+            for t in ('Ordertyp', 'Orderart', 'Auftragsart'):
+                ty = overview.get(t)
+                if ty is not None:
+                    break
+            self.type = self.TYPES.get(ty, ty)
+        self.shares = transaction.get('Anteile')
+        if self.shares is None:
+            self.shares = 1
+
+    @staticmethod
+    def csv_header(sep=';'):
+        return f'Wert{sep}Buchungswährung{sep}Datum{sep}Uhrzeit{sep}Typ{sep}Notiz{sep}Gebühren{sep}Steuern{sep}ISIN{sep}Wertpapiername{sep}Stück\n'
+
+    def csv(self, sep=';', decimal=','):
+        dt = self.dt.astimezone()
+        return (
+            f'{self.value:{decimal}}{sep}{self.value.currency}{sep}{dt:%d.%m.%Y}{sep}'
+            f'{dt:%H:%M:%S}{sep}{self.type}{sep}{self.note}{sep}{self.costs:{decimal}}{sep}{self.taxes:{decimal}}{sep}'
+            f'{self.isin}{sep}{self.name}{sep}{str(self.shares).replace(".", ",")}\n'
+        )
+
+
+class Payment(Event):
+    note: str
+    type: str
+
+    def __init__(self, event: dict):
+        self.dt: datetime = get_timestamp(event['timestamp'])
+        self.value: Amount = amount(event)
+
+    def csv(self, sep=';', decimal=','):
+        dt = self.dt.astimezone()
+        try:
+            taxes = f'{self.taxes:{decimal}}'
+        except AttributeError:
+            taxes = ''
+        return f'{str(self.value.value).replace(".", ",")}{sep}{self.value.currency}{sep}{dt:%d.%m.%Y}{sep}{dt:%H:%M:%S}{sep}{self.type}{sep}{self.note}{sep}{taxes}{sep}{sep}{sep}\n'
+
+    @staticmethod
+    def csv_header(sep=';'):
+        return f'Wert{sep}Buchungswährung{sep}Datum{sep}Uhrzeit{sep}Typ{sep}Notiz{sep}Steuern{sep}ISIN{sep}Wertpapiername{sep}Stück\n'
+
+
+class RoundUp(Investment):
+    """benefits_spare_change_execution"""
+    note = 'Round-up'
+
+
+class AccountTransferIncoming(Investment):
+    note = 'Eingehender Wertpapierübertrag'
+    type = 'Einlieferung'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        if self.value is None:
+            self.value = Amount.zero()
+
+
+def securities_transfer_outgoing(event):
+    try:
+        return SecuritiesTransferOutgoing(event)
+    except Exception:
+        return Ignore(event)
+
+
+class SecuritiesTransferOutgoing(Investment):
+    note = 'Ausgehender Wertpapierübertrag'
+    type = 'Auslieferung'
+
+    def __init__(self, event: dict):
+        self.dt: datetime = get_timestamp(event['timestamp'])
+        self.isin: str = self.get_isin(event)
+        overview = self.get_section(event, 'Übersicht', 'Overview')
+        for t in ('Asset', 'Anteil'):
+            self.name = overview.get(t)
+            if self.name is not None:
+                break
+        self.shares = overview.get('Aktien')
+        if self.shares is None:
+            self.shares = 1
+        self.costs = Amount.zero()
+        self.taxes = Amount.zero()
+        self.value = Amount.zero()
+
+
+class SavingsPlanExec(Investment):
+    note = 'Sparplan'
+
+
+class SaveBack(Investment):
+    note = 'SaveBack'
+
+
+class Order(Investment):
+    note = 'Wertpapierorder'
+
+
+class StockPerkRefunded(AccountTransferIncoming):
+    note = 'Gratisaktie'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        self.type = "Einlieferung"
+
+
+class CardTransaction(Payment):
+    type = 'Entnahme'
+    note = 'Kartenzahlung'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        self.note += f": {event['title']}"
+
+
+class PaymentInbound(Payment):
+    type = 'Einlage'
+    note = 'Eingehende Überweisung'
+
+
+class PaymentInboundSepaDirectDebit(PaymentInbound):
+    note = 'Eingehende Lastschrift'
+
+
+class PaymentOutbound(Payment):
+    type = 'Entnahme'
+    note = 'Ausgehende Überweisung'
+
+
+def SspCorporateActionInvoiceCash(event: dict) -> Event:
+    if event['subtitle'] == 'Vorabpauschale':
+        return Vorabpauschale(event)
+    else:
+        return Dividend(event)
+
+
+class Vorabpauschale(Payment, TransactionEvent):
+    note = 'Vorabpauschale'
+    type = 'Steuern'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        self.isin: str = self.get_isin(event)
+        transaction = self.get_transaction(event)
+        self.taxes = transaction.get('Steuern', Amount.zero())
+        self.name = event['title']
+
+    def csv(self, sep=';'):
+        s = super().csv(sep).rstrip(f'\n{sep}')
+        return f'{s}{sep}{self.isin}{sep}"{self.name}"{sep}\n'
+
+
+class Dividend(Payment, TransactionEvent):
+    """Dividend payout"""
+    type = 'Dividende'
+    note = 'Dividende'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        self.isin: str = self.get_isin(event)
+        transaction = self.get_transaction(event)
+        self.shares = transaction.get('Anteile')
+        self.dividend_per_share = transaction.get('Dividende je Aktie')
+        self.taxes = transaction.get('Steuern', Amount.zero())
+        self.name = event['title']
+
+    def csv(self, sep=';'):
+        s = super().csv(sep).rstrip(f'\n{sep}')
+        return f'{s}{sep}{self.isin}{sep}"{self.name}"{sep}{str(self.shares).replace(".", ",")}\n'
+
+
+class CouponPayment(Payment, TransactionEvent):
+    type = 'Dividende'
+    note = 'Coupon Zahlung'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        self.isin: str = self.get_isin(event)
+        transaction = self.get_transaction(event)
+        self.shares = 1
+        self.value = transaction['Coupon Zahlung']
+        self.taxes = transaction.get('Steuern', Amount.zero())
+        self.name = f'{event["title"]}: Coupon {transaction["Coupon"]}'
+
+    def csv(self, sep=';'):
+        s = super().csv(sep).rstrip(f'\n{sep}')
+        return f'{s}{sep}{self.taxes}{sep}{self.isin}{sep}"{self.name}"{sep}{self.shares}\n'
+
+
+class InterestPayout(Payment, TransactionEvent):
+    type = 'Zinsen'
+    note = 'Zinsen'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        transaction = self.get_transaction(event)
+        self.taxes = transaction.get('Steuern', Amount.zero())
+
+
+class TaxRefund(Payment):
+    type = 'Steuerrückerstattung'
+    note = 'Steuerrückerstattung'
+
+
+class CardRefund(CardTransaction):
+    type = 'Einlage'
+    note = 'Kartenrückzahlung'
+
+
+class CardOriginalCreditTransaction(CardTransaction):
+    type = 'Einlage'
+    note = 'Kartenrückzahlung'
+
+
+class CardWithdrawal(CardTransaction):
+    type = 'Entnahme'
+    note = 'Geldautomat'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        self.note += f" {event['subtitle']}"
+
+
+class CardOrderBilled(Payment):
+    type = 'Gebühren'
+    note = 'Kartengebühr'
+
+
+class BondRepayment(Investment):
+    note = 'Anleihe'
+
+    def __init__(self, event: dict):
+        super().__init__(event)
+        self.type = 'Verkauf'
+
+
+class Converter:
+    event_types: dict[str, Callable[[dict], Any]] = {
+        # Orders
+        'ORDER_EXECUTED': Order,
+        'TRADE_INVOICE': Order,
+        'SAVINGS_PLAN_EXECUTED': SavingsPlanExec,
+        'SAVINGS_PLAN_INVOICE_CREATED': SavingsPlanExec,
+        'trading_savingsplan_executed': SavingsPlanExec,
+        'ACCOUNT_TRANSFER_INCOMING': AccountTransferIncoming,
+        'SECURITIES_TRANSFER_OUTGOING': securities_transfer_outgoing,
+        'ssp_securities_transfer_outgoing': securities_transfer_outgoing,
+        'ORDER_EXPIRED': Ignore,
+        'ORDER_CANCELED': Ignore,
+        'YEAR_END_TAX_REPORT': Ignore,
+        'PRE_DETERMINED_TAX_BASE_EARNING': Ignore,
+        'REFERENCE_ACCOUNT_CHANGED': Ignore,
+        'EX_POST_COST_REPORT': Ignore,
+        'card_successful_verification': Ignore,
+        # Payments
+        'PAYMENT_INBOUND': PaymentInbound,
+        'INCOMING_TRANSFER': PaymentInbound,
+        'PAYMENT_INBOUND_SEPA_DIRECT_DEBIT': PaymentInboundSepaDirectDebit,
+        'PAYMENT_OUTBOUND': PaymentOutbound,
+        'OUTGOING_TRANSFER': PaymentOutbound,
+        'INCOMING_TRANSFER_DELEGATION': PaymentInbound,
+        'OUTGOING_TRANSFER_DELEGATION': PaymentOutbound,
+        'CREDIT': Dividend,
+        'ssp_corporate_action_invoice_cash': SspCorporateActionInvoiceCash,
+        'ssp_corporate_action_invoice_shares': Ignore,  # Vorabpauschale without payment
+        'INTEREST_PAYOUT_CREATED': InterestPayout,
+        'INTEREST_PAYOUT': InterestPayout,
+        'card_successful_oct': CardOriginalCreditTransaction,
+        'card_order_billed': CardOrderBilled,
+        'card_refund': CardRefund,
+        'card_successful_atm_withdrawal': CardWithdrawal,
+        'STOCK_PERK_REFUNDED': StockPerkRefunded,
+        'REPAYMENT': BondRepayment,
+        # Card
+        'card_successful_transaction': CardTransaction,
+        'card_failed_transaction': Ignore,
+        'card_failed_atm_withdrawal': Ignore,
+        'card_failed_verification': Ignore,
+        # Card related orders
+        'benefits_spare_change_execution': RoundUp,
+        'benefits_saveback_execution': SaveBack,
+        # Bonds
+        'COUPON_PAYMENT': CouponPayment,
+        # Account
+        'PUK_CREATED': Ignore,
+        'CUSTOMER_CREATED': Ignore,
+        'SECURITIES_ACCOUNT_CREATED': Ignore,
+        'DOCUMENTS_CREATED': Ignore,
+        'DOCUMENTS_ACCEPTED': Ignore,
+        'DEVICE_RESET': Ignore,
+        'PIN_RESET': Ignore,
+        'EMAIL_VALIDATED': Ignore,
+        'INPAYMENTS_SEPA_MANDATE_CREATED': Ignore,
+        'QUARTERLY_REPORT': Ignore,
+        'GESH_CORPORATE_ACTION': Ignore,
+        'new_tr_iban': Ignore,
+        'ssp_corporate_action_informative_notification': Ignore,
+        'VERIFICATION_TRANSFER_ACCEPTED': Ignore,
+        'MOBILE_CHANGED': Ignore,
+        'STOCK_PERK_EXPIRED': Ignore,
+        'AML_SOURCE_OF_WEALTH_RESPONSE_EXECUTED': Ignore,
+        'MOBILE_RESET': Ignore,
+        # Taxes
+        'EXEMPTION_ORDER_CHANGED': Ignore,
+        'EXEMPTION_ORDER_CHANGE_REQUESTED': Ignore,
+        'TAX_REFUND': TaxRefund,
+        'ssp_tax_correction_invoice': TaxRefund,
+        'TAX_YEAR_END_REPORT': Ignore,
+        # Others
+        'EX_POST_COST_REPORT_CREATED': Ignore,
+        'timeline_legacy_migrated_events': Ignore,
+    }
+
+    def convert(self, events: dict, payments_file: None | str | Path, orders_file: None | str | Path):
+        processed = self.process(events)
+
+        if payments_file:
+            with open(payments_file, 'w', encoding='utf-8') as fh:
+                fh.write(Payment.csv_header())
+                for p in processed:
+                    if isinstance(p, Payment):
+                        fh.write(p.csv())
+
+        if orders_file:
+            with open(orders_file, 'w', encoding='utf-8') as fh:
+                fh.write(Investment.csv_header())
+                for p in processed:
+                    if isinstance(p, Investment):
+                        fh.write(p.csv())
+
+    def process(self, events: dict):
+        data = []
+        for event in events:
+            func = self.event_types.get(event['eventType'], Unknown)
+            try:
+                ev = func(event)
+                if isinstance(ev, Unknown):
+                    print(f"Unknown event type {event['eventType']}")
+                if not isinstance(ev, Ignore):
+                    data.append(ev)
+            except (AttributeError, IndexError, KeyError, TypeError):
+                print(f"Error while processing event type {event['eventType']}")
+        return data
+
+
+def main():
+    import sys
+    filename = sys.argv[1]
+    with open(filename, 'rt', encoding='utf-8') as fh:
+        events = json.load(fh)
+    basedir = Path(filename).parent
+    Converter().convert(events, basedir / 'payments.csv', basedir / 'orders.csv')
+
+
+if __name__ == '__main__':
+    main()
