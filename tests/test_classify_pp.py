@@ -3,21 +3,19 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from pytr.classify_pp import (
     DEFAULT_CONFIG_PATH,
     SECURITY_EVENT_TYPES,
     _extract_isin,
+    build,
     collect_isins,
     load_config,
-    build,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_new_event(event_type: str, isin: str, title: str = "Test Security") -> dict:
     """Minimal new-style TR event with ISIN in header section."""
@@ -53,6 +51,7 @@ def _make_old_event(event_type: str, isin: str, title: str = "Old Security") -> 
 # _extract_isin
 # ---------------------------------------------------------------------------
 
+
 class TestExtractIsin:
     def test_new_style_header_section(self):
         event = _make_new_event("TRADING_TRADE_EXECUTED", "IE00B4L5Y983")
@@ -87,6 +86,7 @@ class TestExtractIsin:
 # ---------------------------------------------------------------------------
 # collect_isins
 # ---------------------------------------------------------------------------
+
 
 class TestCollectIsins:
     def test_single_new_style_event(self):
@@ -141,6 +141,7 @@ class TestCollectIsins:
 # load_config
 # ---------------------------------------------------------------------------
 
+
 class TestLoadConfig:
     def test_missing_file_returns_empty(self, tmp_path):
         result = load_config(tmp_path / "nonexistent.json")
@@ -174,6 +175,7 @@ class TestLoadConfig:
     def test_none_falls_back_to_default_path(self, monkeypatch, tmp_path):
         # Monkeypatch DEFAULT_CONFIG_PATH to a temp path that doesn't exist
         import pytr.classify_pp as cp
+
         monkeypatch.setattr(cp, "DEFAULT_CONFIG_PATH", tmp_path / "no_config.json")
         result = cp.load_config(None)
         assert result == {}
@@ -182,6 +184,7 @@ class TestLoadConfig:
 # ---------------------------------------------------------------------------
 # build
 # ---------------------------------------------------------------------------
+
 
 class TestBuild:
     def _write_events(self, tmp_path, events):
@@ -267,9 +270,11 @@ class TestBuild:
 # build_classification subcommand parser
 # ---------------------------------------------------------------------------
 
+
 class TestBuildClassificationParser:
     def _get_parser(self):
         from pytr.main import get_main_parser
+
         return get_main_parser()
 
     def test_subcommand_exists(self):

@@ -9,10 +9,10 @@ import pytest
 
 from pytr.trdl_pp import Downloader, get_timestamp
 
-
 # ---------------------------------------------------------------------------
 # get_timestamp
 # ---------------------------------------------------------------------------
+
 
 class TestGetTimestamp:
     def test_standard_tr_format_with_milliseconds(self):
@@ -42,10 +42,10 @@ class TestGetTimestamp:
         assert dt.tzinfo is not None
 
 
-
 # ---------------------------------------------------------------------------
 # Downloader
 # ---------------------------------------------------------------------------
+
 
 class TestDownloader:
     def test_init_starts_clean(self):
@@ -80,10 +80,12 @@ class TestDownloader:
 # export_pp argument parser
 # ---------------------------------------------------------------------------
 
+
 class TestExportPpParser:
     @pytest.fixture
     def parser(self):
         from pytr.main import get_main_parser
+
         return get_main_parser()
 
     def test_last_days_default_is_zero(self, parser):
@@ -112,12 +114,17 @@ class TestExportPpParser:
         assert args.docs_dir is None
 
     def test_individual_output_files_parsed(self, parser):
-        args = parser.parse_args([
-            "export_pp",
-            "-P", "payments.csv",
-            "-O", "orders.csv",
-            "-E", "events.json",
-        ])
+        args = parser.parse_args(
+            [
+                "export_pp",
+                "-P",
+                "payments.csv",
+                "-O",
+                "orders.csv",
+                "-E",
+                "events.json",
+            ]
+        )
         assert args.payments_file == Path("payments.csv")
         assert args.orders_file == Path("orders.csv")
         assert args.events_file == Path("events.json")
@@ -148,6 +155,7 @@ class TestExportPpParser:
 # export_pp path traversal guard
 # ---------------------------------------------------------------------------
 
+
 class TestExportPpPathGuard:
     """Regression tests for the resolve-and-contain check in export_pp doc download."""
 
@@ -168,3 +176,86 @@ class TestExportPpPathGuard:
         full_path = docs_dir / rel_path
         with pytest.raises(ValueError):
             full_path.resolve().relative_to(resolved_docs_dir)
+
+
+# ---------------------------------------------------------------------------
+# _find_last_run_timestamp
+# ---------------------------------------------------------------------------
+
+
+class TestFindLastRunTimestamp:
+    """Tests for the incremental-mode helper that scans for timestamped export subfolders."""
+
+    @pytest.fixture(autouse=True)
+    def _import(self):
+        from pytr.main import _find_last_run_timestamp
+
+        self.find = _find_last_run_timestamp
+
+    def test_nonexistent_dir_returns_none(self, tmp_path):
+        assert self.find(tmp_path / "does_not_exist") is None
+
+    def test_empty_dir_returns_none(self, tmp_path):
+        assert self.find(tmp_path) is None
+
+    def test_single_valid_subdir_returned(self, tmp_path):
+        (tmp_path / "2024-03-15_10-30-00").mkdir()
+        result = self.find(tmp_path)
+        assert result is not None
+        assert result.year == 2024
+        assert result.month == 3
+        assert result.day == 15
+        assert result.hour == 10
+        assert result.minute == 30
+
+    def test_returns_latest_of_multiple(self, tmp_path):
+        (tmp_path / "2024-01-01_00-00-00").mkdir()
+        (tmp_path / "2024-06-15_12-30-00").mkdir()
+        (tmp_path / "2023-12-31_23-59-59").mkdir()
+        result = self.find(tmp_path)
+        assert result.year == 2024
+        assert result.month == 6
+        assert result.day == 15
+
+    def test_ignores_files_not_dirs(self, tmp_path):
+        (tmp_path / "2024-03-15_10-30-00").write_text("not a dir")
+        assert self.find(tmp_path) is None
+
+    def test_ignores_non_matching_dir_names(self, tmp_path):
+        (tmp_path / "output").mkdir()
+        (tmp_path / "2024-03-15").mkdir()  # date only, no time
+        (tmp_path / "backup_2024-03-15_10-30-00").mkdir()  # has prefix
+        assert self.find(tmp_path) is None
+
+    def test_ignores_non_matching_mixed_with_valid(self, tmp_path):
+        (tmp_path / "output").mkdir()
+        (tmp_path / "2024-03-15_10-30-00").mkdir()
+        result = self.find(tmp_path)
+        assert result is not None
+        assert result.day == 15
+
+
+# ---------------------------------------------------------------------------
+# export_pp --incremental parser
+# ---------------------------------------------------------------------------
+
+
+class TestExportPpIncrementalParser:
+    @pytest.fixture
+    def parser(self):
+        from pytr.main import get_main_parser
+
+        return get_main_parser()
+
+    def test_incremental_default_is_false(self, parser):
+        args = parser.parse_args(["export_pp"])
+        assert args.incremental is False
+
+    def test_incremental_flag_sets_true(self, parser):
+        args = parser.parse_args(["export_pp", "--incremental"])
+        assert args.incremental is True
+
+    def test_incremental_with_dir(self, parser):
+        args = parser.parse_args(["export_pp", "--incremental", "-D", "/tmp/out"])
+        assert args.incremental is True
+        assert args.dir == Path("/tmp/out")

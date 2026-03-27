@@ -82,9 +82,11 @@ pytrpp2 export_pp -n +49123456789 -p 1234 -D /path/to/output
 # Also download PDF documents into a timestamped subfolder:
 pytrpp2 export_pp -n +49123456789 -p 1234 -D /path/to/output -F /path/to/docs
 
-# Incremental — only the last 30 days:
-pytrpp2 export_pp -n +49123456789 -p 1234 -D /path/to/output --last_days 30
+# Incremental — only fetch events since the last run:
+pytrpp2 export_pp -n +49123456789 -p 1234 -D /path/to/output --incremental
 ```
+
+Each run with `-D` creates a timestamped subfolder (`YYYY-MM-DD_HH-MM-SS`) inside the given directory. Pass `--incremental` to automatically start from where the last run left off — pytrpp2 scans the directory for the most recent subfolder and fetches only events after that timestamp. If no previous run is found, all events are fetched.
 
 If phone number or PIN is omitted, pytrpp2 will prompt for them or read them from `~/.pytr/credentials` (first line: phone number, second line: PIN).
 
@@ -121,6 +123,9 @@ Download options:
 Date range (both default to 0 = include everything):
   --last_days DAYS              Include only the last N days of data
   --days_until DAYS             Exclude the most recent N days (offset the end date)
+  --incremental                 Only fetch events after the last run (requires -D).
+                                Scans -D for existing timestamped subfolders and uses
+                                the most recent one as the start time.
 ```
 
 ### Output files

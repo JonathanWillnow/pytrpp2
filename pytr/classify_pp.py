@@ -161,10 +161,12 @@ def build(events_file: Path, output_file: Path, config_path: Path | None = None)
     instruments = []
     for isin, name in sorted(known_isins.items()):
         key = config.get(isin, "RISKY")
-        instruments.append({
-            "identifiers": {"name": name, "isin": isin},
-            "categories": [{"path": [key_to_name[key]], "weight": 100.0}],
-        })
+        instruments.append(
+            {
+                "identifiers": {"name": name, "isin": isin},
+                "categories": [{"path": [key_to_name[key]], "weight": 100.0}],
+            }
+        )
 
     taxonomy = {**TAXONOMY, "instruments": instruments}
     output_file.parent.mkdir(parents=True, exist_ok=True)

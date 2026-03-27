@@ -3,15 +3,13 @@
 import json
 from pathlib import Path
 
-import pytest
-
 from pytr.check_mappings_pp import find_gaps, print_gap_report
 from pytr.conv_pp import Converter, Ignore
-
 
 # ---------------------------------------------------------------------------
 # find_gaps
 # ---------------------------------------------------------------------------
+
 
 class TestFindGaps:
     def test_known_type_not_a_gap(self):
@@ -67,6 +65,7 @@ class TestFindGaps:
 # print_gap_report
 # ---------------------------------------------------------------------------
 
+
 class TestPrintGapReport:
     def test_no_gaps_prints_ok(self, capsys):
         known_type = next(iter(Converter.event_types))
@@ -102,9 +101,11 @@ class TestPrintGapReport:
 # check_mappings subcommand parser
 # ---------------------------------------------------------------------------
 
+
 class TestCheckMappingsParser:
     def _get_parser(self):
         from pytr.main import get_main_parser
+
         return get_main_parser()
 
     def test_subcommand_exists(self):
@@ -122,13 +123,16 @@ class TestCheckMappingsParser:
 # Integration: check_mappings subcommand end-to-end
 # ---------------------------------------------------------------------------
 
+
 class TestCheckMappingsIntegration:
     def test_runs_on_empty_events_file(self, tmp_path, capsys):
         ef = tmp_path / "events.json"
         ef.write_text(json.dumps([]), encoding="utf-8")
 
-        from pytr.main import get_main_parser
         import sys
+
+        from pytr.main import get_main_parser
+
         old_argv = sys.argv
         sys.argv = ["pytrpp2", "check_mappings", str(ef)]
         try:
@@ -148,6 +152,7 @@ class TestCheckMappingsIntegration:
         ef.write_text(json.dumps(events), encoding="utf-8")
 
         from pytr.main import get_main_parser
+
         args = get_main_parser().parse_args(["check_mappings", str(ef)])
         with open(args.events_file, encoding="utf-8") as fh:
             loaded = json.load(fh)

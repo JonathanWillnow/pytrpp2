@@ -43,6 +43,16 @@ Changelog = "https://github.com/JonathanWillnow/pytrpp2/releases"
 [project.scripts]
 pytrpp2 = "pytr.main:main"
 
+[tool.hatch.build.targets.wheel]
+packages = ["pytr"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    ".github/",
+    ".vscode/",
+    "CLAUDE.md",
+]
+
 [tool.hatch.build.hooks.babel]
 locale_dir = "pytr/locale"
 

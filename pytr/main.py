@@ -3,6 +3,7 @@
 import argparse
 import asyncio
 import json
+import re
 import shutil
 import signal
 import string
@@ -15,6 +16,8 @@ import shtab
 
 from pytr.account import login
 from pytr.alarms import Alarms
+from pytr.check_mappings_pp import print_gap_report
+from pytr.classify_pp import build as build_classification
 from pytr.conv_pp import Converter
 from pytr.details import Details
 from pytr.dl import DL
@@ -22,11 +25,30 @@ from pytr.event import Event
 from pytr.portfolio import PORTFOLIO_COLUMNS, Portfolio
 from pytr.timeline import Timeline
 from pytr.transactions import SUPPORTED_LANGUAGES, TransactionExporter
-from pytr.check_mappings_pp import find_gaps, print_gap_report
-from pytr.classify_pp import build as build_classification
 from pytr.trdl_pp import Downloader as PPDownloader
 from pytr.trdl_pp import get_timestamp
 from pytr.utils import check_version, get_logger
+
+_TS_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
+
+
+def _find_last_run_timestamp(base_dir: Path) -> datetime | None:
+    """Return the datetime of the most recent timestamped export subfolder in base_dir, or None.
+
+    Scans base_dir for subdirectories whose names match YYYY-MM-DD_HH-MM-SS (the format
+    created by export_pp -D). Returns the latest one as a naive local datetime, or None if
+    no matching subdirectory exists or base_dir does not exist.
+    """
+    if not base_dir.is_dir():
+        return None
+    candidates = []
+    for entry in base_dir.iterdir():
+        if entry.is_dir() and _TS_PATTERN.match(entry.name):
+            try:
+                candidates.append(datetime.strptime(entry.name, "%Y-%m-%d_%H-%M-%S"))
+            except ValueError:
+                pass
+    return max(candidates) if candidates else None
 
 
 def get_main_parser():
@@ -403,7 +425,7 @@ def get_main_parser():
         "--dir",
         type=Path,
         default=None,
-        help="Main output directory. Sets default paths for events.json, payments.csv, and orders.csv (does NOT trigger document download; use -F for that).",
+        help="Main output directory. A timestamped subfolder (YYYY-MM-DD_HH-MM-SS) is created inside it on each run, and events.json, payments.csv, orders.csv are written there (does NOT trigger document download; use -F for that).",
     )
     parser_export_pp.add_argument(
         "-E",
@@ -457,6 +479,16 @@ def get_main_parser():
         default=0,
         type=int,
     )
+    parser_export_pp.add_argument(
+        "--incremental",
+        action="store_true",
+        default=False,
+        help=(
+            "Only fetch events after the last run. "
+            "Scans -D/--dir for existing timestamped subfolders and uses the most recent one as the start time. "
+            "Requires -D/--dir. If no previous run is found, all events are fetched."
+        ),
+    )
 
     # check_mappings
     info = "Check an events.json for TR event types not covered by the converter (gap detector)"
@@ -493,10 +525,7 @@ def get_main_parser():
     parser_build_classification.add_argument(
         "--config",
         dest="config_path",
-        help=(
-            "Path to classifications_config.json. "
-            "Defaults to ~/.pytr/classifications_config.json if not given."
-        ),
+        help=("Path to classifications_config.json. Defaults to ~/.pytr/classifications_config.json if not given."),
         type=Path,
         default=None,
     )
@@ -693,14 +722,27 @@ def main():
             print(e)
             return -1
     elif args.command == "export_pp":
-        # Apply --dir defaults
+        if args.incremental:
+            if not args.dir:
+                print("--incremental requires -D/--dir to be set.")
+                return -1
+            last_ts = _find_last_run_timestamp(args.dir)
+            if last_ts:
+                not_before = last_ts.astimezone().timestamp()
+                log.info(f"Incremental mode: fetching events after {last_ts:%Y-%m-%d %H:%M:%S}")
+            else:
+                log.info(f"Incremental mode: no previous run found in '{args.dir}', fetching all events")
+
+        # Create a timestamped run subfolder and set default output paths inside it
         if args.dir:
+            run_dir = args.dir / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+            run_dir.mkdir(parents=True, exist_ok=True)
             if not args.events_file:
-                args.events_file = args.dir / "events.json"
+                args.events_file = run_dir / "events.json"
             if not args.payments_file:
-                args.payments_file = args.dir / "payments.csv"
+                args.payments_file = run_dir / "payments.csv"
             if not args.orders_file:
-                args.orders_file = args.dir / "orders.csv"
+                args.orders_file = run_dir / "orders.csv"
 
         if not any((args.docs_dir, args.events_file, args.payments_file, args.orders_file)):
             print("No output target selected. Use -D <dir> or specify individual output files (-E/-P/-O/-F).")
@@ -786,13 +828,12 @@ def main():
             payments_count = _count_csv_rows(args.payments_file)
             converted = orders_count + payments_count
             total = len(events)
-            log.info(f"Event audit:")
+            log.info("Event audit:")
             log.info(f"  Raw events fetched from TR : {total}")
             log.info(f"  Converted to orders.csv   : {orders_count}")
             log.info(f"  Converted to payments.csv : {payments_count}")
             if total > converted:
-                log.info(f"  Ignored / skipped         : {total - converted}"
-                         "  (account events, expired orders, etc.)")
+                log.info(f"  Ignored / skipped         : {total - converted}  (account events, expired orders, etc.)")
             print_gap_report(events)
 
         if args.events_file:
