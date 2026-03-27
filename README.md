@@ -1,13 +1,23 @@
-# pytrpp2: Download TradeRepublic data and export to Portfolio Performance
+# pytrpp2: Trade Republic data exporter with Portfolio Performance support
 
 This is a tool for the private API of the Trade Republic online brokerage.
 This package and its authors are not affiliated with Trade Republic Bank GmbH.
 
-It can export orders and transactions into files ready to import into [Portfolio Performance](https://www.portfolio-performance.info/) —
-*an open source tool to calculate the overall performance of an investment portfolio across all accounts using True-Time Weighted Return or Internal Rate of Return.*
-The authors of this package are not affiliated with Portfolio Performance.
+---
 
-This package is based on [`pytr`](https://github.com/pytr-org/pytr) originally by marzzzello, extended with Portfolio Performance export functionality.
+## What pytrpp2 adds compared to pytr
+
+pytrpp2 is a fork of [`pytr`](https://github.com/pytr-org/pytr) and includes all of its original functionality. On top of that, pytrpp2 adds three subcommands specifically for [Portfolio Performance](https://www.portfolio-performance.info/) users:
+
+| Added subcommand | What it does |
+|---|---|
+| `export_pp` | Downloads your full TR timeline and converts it to Portfolio Performance-compatible CSV files (`payments.csv`, `orders.csv`). Handles all TR event types including the post-2025 API format. Optionally downloads PDF documents. |
+| `build_classification` | Reads the raw events JSON from `export_pp` and generates a `classification.json` taxonomy (Asset Allocation: RISKY / CASH) ready to import into Portfolio Performance under *Wertpapiere → Klassifizierungen*. |
+| `check_mappings` | Reads an events JSON and reports any TR event types that have no converter handler — useful after a Trade Republic API update to spot silent data loss before it happens. |
+
+The CSV format produced by `export_pp` matches exactly what Portfolio Performance expects:
+- `payments.csv` → *Account Transactions* (dividends, interest, coupons, bond repayments, transfers)
+- `orders.csv` → *Portfolio Transactions* (buy / sell / savings plan orders)
 
 ---
 
@@ -29,17 +39,12 @@ pip install -e .
 
 ---
 
-## Usage
+## Commands
 
-The command is `pytrpp2`. Run `pytrpp2 --help` to see all available subcommands.
+The CLI entry point is `pytrpp2`. Run `pytrpp2 --help` or `pytrpp2 <command> --help` for details.
 
 ```
-usage: pytrpp2 [-h] [-V] [-v {warning,info,debug}]
-               {help,login,portfolio,details,dl_docs,export_transactions,
-                get_price_alarms,set_price_alarms,export_pp,completion} ...
-
 Commands:
-  help                  Print this help message
   login                 Check credentials and log in (performs device reset if needed)
   portfolio             Show current portfolio
   details               Get details for an ISIN
@@ -47,7 +52,9 @@ Commands:
   export_transactions   Export timeline transactions to CSV
   get_price_alarms      Get current price alarms
   set_price_alarms      Set new price alarms
-  export_pp             Export TR timeline to Portfolio Performance CSV format
+  export_pp             Export TR timeline to Portfolio Performance CSV format  ← added by pytrpp2
+  build_classification  Build a Portfolio Performance classification taxonomy   ← added by pytrpp2
+  check_mappings        Check for unmapped TR event types in an events JSON     ← added by pytrpp2
   completion            Print shell tab completion
 
 Global options:
@@ -58,20 +65,20 @@ Global options:
 
 ---
 
-## export_pp — Portfolio Performance Export
+## export_pp — Portfolio Performance export
 
-The `export_pp` subcommand downloads your full Trade Republic timeline and converts it into files that Portfolio Performance can import.
+Downloads your Trade Republic timeline and converts it to files ready to import into Portfolio Performance.
 
-### Recommended usage
+### Quick start
 
 ```sh
-# Export CSVs and event log into a directory (no PDF download):
+# Export CSVs and event log into a directory:
 pytrpp2 export_pp -n +49123456789 -p 1234 -D /path/to/output
 
 # Also download PDF documents into a timestamped subfolder:
 pytrpp2 export_pp -n +49123456789 -p 1234 -D /path/to/output -F /path/to/docs
 
-# Limit to the last 30 days:
+# Incremental — only the last 30 days:
 pytrpp2 export_pp -n +49123456789 -p 1234 -D /path/to/output --last_days 30
 ```
 
@@ -86,23 +93,20 @@ usage: pytrpp2 export_pp [-h] [-n PHONE_NO] [-p PIN] [--applogin]
                           [-O ORDERS_FILE] [-F DOCS_DIR] [--workers WORKERS]
                           [--last_days DAYS] [--days_until DAYS]
 
-options:
-  -h, --help                    show this help message and exit
-
 Authentication:
-  -n, --phone_no PHONE_NO       TradeRepublic phone number (international format, e.g. +49123456789)
+  -n, --phone_no PHONE_NO       TradeRepublic phone number (international format)
   -p, --pin PIN                 TradeRepublic PIN
   --applogin                    Use app login instead of web login
-  --waf-token WAF_TOKEN         Manually provide an aws-waf-token cookie value (copy from browser session)
-  --store_credentials           Store credentials (phone number, PIN, cookies) for next run
+  --waf-token WAF_TOKEN         Manually provide an aws-waf-token cookie value
+  --store_credentials           Store credentials for next run
 
 Output (use -D to set all at once, or specify individually):
-  -D, --dir DIR                 Main output directory. Automatically sets paths for
+  -D, --dir DIR                 Main output directory. Sets default paths for
                                 events.json, payments.csv, and orders.csv.
                                 Does NOT trigger PDF download — use -F for that.
   -E, --events-file FILE        Write raw event data to this JSON file
-  -P, --payments-file FILE      Write payments (dividends, interest, etc.) to this CSV file
-  -O, --orders-file FILE        Write orders (buy/sell) to this CSV file
+  -P, --payments-file FILE      Write payments (dividends, interest, etc.) to this CSV
+  -O, --orders-file FILE        Write orders (buy/sell) to this CSV
   -F, --docs-dir DIR            Download PDF documents into this directory.
                                 A timestamped subfolder (YYYY-MM-DD_HH-MM-SS) is
                                 created automatically on each run.
@@ -117,12 +121,66 @@ Date range (both default to 0 = include everything):
 
 ### Output files
 
-| File | Contents | Portfolio Performance import type |
+| File | Contents | Portfolio Performance import |
 |---|---|---|
-| `payments.csv` | Dividends, interest payouts, coupon payments, bond repayments | Account transactions |
-| `orders.csv` | Buy and sell orders | Security orders |
+| `payments.csv` | Dividends, interest, coupons, bond repayments, transfers | *Account Transactions* |
+| `orders.csv` | Buy / sell / savings plan orders | *Portfolio Transactions* |
 | `events.json` | Full raw event data from TR timeline | — (audit / debugging) |
-| `DOCS_DIR/YYYY-MM-DD_HH-MM-SS/` | PDF documents (contract notes, tax statements, etc.) | — |
+| `DOCS_DIR/YYYY-MM-DD_HH-MM-SS/` | PDF documents (contract notes, tax statements) | — |
+
+After conversion, `export_pp` automatically runs a mapping gap check (see `check_mappings` below) and prints event counts.
+
+---
+
+## build_classification — Asset Allocation taxonomy
+
+Reads the events JSON from `export_pp` and generates a `classification.json` for Portfolio Performance's *Klassifizierungen* feature. It collects every security ISIN from your transaction history and assigns each one to a category based on an optional config file.
+
+```sh
+# Minimal — all ISINs default to RISKY:
+pytrpp2 build_classification /path/to/events.json classification.json
+
+# With explicit config:
+pytrpp2 build_classification /path/to/events.json classification.json --config /path/to/classifications_config.json
+```
+
+Import the result in Portfolio Performance under:
+> **Wertpapiere → Klassifizierungen → [taxonomy] → ⋮ → Importieren**
+
+### Config file format
+
+Copy `pytr/classifications_config.example.json` to `~/.pytr/classifications_config.json` and edit it:
+
+```json
+{
+  "classifications": {
+    "IE00B4L5Y983": "RISKY",
+    "IE00B3WJKG14": "CASH",
+    "DE0001030542": "CASH"
+  }
+}
+```
+
+Valid keys: `RISKY` (Risikobehafteter Portfolioteil) and `CASH` (Risikoarmer Anteil). ISINs not listed default to `RISKY`. After each run, any unconfigured ISINs are printed to the console.
+
+If `--config` is not provided, pytrpp2 looks for `~/.pytr/classifications_config.json` automatically.
+
+---
+
+## check_mappings — Gap detector
+
+Checks an events JSON for TR event types that have no handler in the converter. These would be silently dropped from `payments.csv` and `orders.csv` — typically caused by Trade Republic renaming or introducing event types after a platform update.
+
+```sh
+pytrpp2 check_mappings /path/to/events.json
+```
+
+Output:
+- **WARNING** + table of unmapped types with counts (if any gaps exist)
+- Intentionally ignored types (account events, notifications — expected)
+- Registered handlers not seen in this export (old TR names / unused handlers)
+
+`export_pp` runs this check automatically after every conversion, so you only need to call it manually to re-check an older events JSON.
 
 ---
 
@@ -130,7 +188,7 @@ Date range (both default to 0 = include everything):
 
 ### Web login (default)
 
-Web login simulates a browser session using [app.traderepublic.com](https://app.traderepublic.com/). After entering your phone number and PIN, you will receive a four-digit code in the TradeRepublic app or via SMS. You will need to re-enter a code periodically when the session cookie expires.
+Web login simulates a browser session using [app.traderepublic.com](https://app.traderepublic.com/). After entering your phone number and PIN, you will receive a four-digit code in the TradeRepublic app or via SMS. You may need to re-enter a code periodically when the session cookie expires.
 
 ### App login
 
@@ -138,6 +196,14 @@ App login uses the same method as the mobile app. Pass `--applogin` to use it. O
 
 ```sh
 pytrpp2 login --applogin
+```
+
+### AWS WAF token
+
+Since early 2026 Trade Republic requires an `aws-waf-token` cookie on all auth endpoints. pytrpp2 handles this automatically during web login. If automatic detection fails, you can paste a token copied from your browser session:
+
+```sh
+pytrpp2 export_pp --waf-token <token> ...
 ```
 
 ### Credentials file

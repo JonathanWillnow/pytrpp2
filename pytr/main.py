@@ -22,6 +22,8 @@ from pytr.event import Event
 from pytr.portfolio import PORTFOLIO_COLUMNS, Portfolio
 from pytr.timeline import Timeline
 from pytr.transactions import SUPPORTED_LANGUAGES, TransactionExporter
+from pytr.check_mappings_pp import find_gaps, print_gap_report
+from pytr.classify_pp import build as build_classification
 from pytr.trdl_pp import Downloader as PPDownloader
 from pytr.trdl_pp import get_timestamp
 from pytr.utils import check_version, get_logger
@@ -456,6 +458,49 @@ def get_main_parser():
         type=int,
     )
 
+    # check_mappings
+    info = "Check an events.json for TR event types not covered by the converter (gap detector)"
+    parser_check_mappings = parser_cmd.add_parser(
+        "check_mappings",
+        formatter_class=formatter,
+        help=info,
+        description=info,
+    )
+    parser_check_mappings.add_argument(
+        "events_file",
+        help="Path to the raw events JSON (produced by export_pp -E or -D)",
+        type=Path,
+    )
+
+    # build_classification
+    info = "Build a Portfolio Performance Klassifizierung taxonomy JSON from an events.json file"
+    parser_build_classification = parser_cmd.add_parser(
+        "build_classification",
+        formatter_class=formatter,
+        help=info,
+        description=info,
+    )
+    parser_build_classification.add_argument(
+        "events_file",
+        help="Path to the raw events JSON (produced by export_pp -E or -D)",
+        type=Path,
+    )
+    parser_build_classification.add_argument(
+        "output_file",
+        help="Where to write the classification.json (e.g. classification.json)",
+        type=Path,
+    )
+    parser_build_classification.add_argument(
+        "--config",
+        dest="config_path",
+        help=(
+            "Path to classifications_config.json. "
+            "Defaults to ~/.pytr/classifications_config.json if not given."
+        ),
+        type=Path,
+        default=None,
+    )
+
     # completion
     info = "Print shell tab completion"
     parser_completion = parser_cmd.add_parser(
@@ -706,8 +751,15 @@ def main():
                                 files.append((doc_url, rel_path))
             num = len(files)
             skipped = 0
+            resolved_docs_dir = docs_dir.resolve()
             for n, (doc_url, rel_path) in enumerate(reversed(files), start=1):
                 full_path = docs_dir / rel_path
+                try:
+                    full_path.resolve().relative_to(resolved_docs_dir)
+                except ValueError:
+                    log.warning(f"Skipping document with path outside output directory: {rel_path!r}")
+                    skipped += 1
+                    continue
                 if full_path.exists():
                     skipped += 1
                     log.debug(f"Skipping {n}/{num}: '{rel_path}'")
@@ -723,10 +775,37 @@ def main():
         if args.payments_file or args.orders_file:
             Converter().convert(events, args.payments_file, args.orders_file)
 
+            # Event audit
+            def _count_csv_rows(path):
+                if path is None or not Path(path).exists():
+                    return 0
+                with open(path, encoding="utf-8") as fh:
+                    return max(0, sum(1 for _ in fh) - 1)
+
+            orders_count = _count_csv_rows(args.orders_file)
+            payments_count = _count_csv_rows(args.payments_file)
+            converted = orders_count + payments_count
+            total = len(events)
+            log.info(f"Event audit:")
+            log.info(f"  Raw events fetched from TR : {total}")
+            log.info(f"  Converted to orders.csv   : {orders_count}")
+            log.info(f"  Converted to payments.csv : {payments_count}")
+            if total > converted:
+                log.info(f"  Ignored / skipped         : {total - converted}"
+                         "  (account events, expired orders, etc.)")
+            print_gap_report(events)
+
         if args.events_file:
             with open(args.events_file, "w") as fh:
                 json.dump(events, fh, indent=2)
 
+    elif args.command == "check_mappings":
+        with open(args.events_file, encoding="utf-8") as fh:
+            events = json.load(fh)
+        print(f"check_mappings: {len(events)} events in {args.events_file.name}")
+        print_gap_report(events)
+    elif args.command == "build_classification":
+        build_classification(args.events_file, args.output_file, args.config_path)
     elif args.version:
         installed_version = version("pytr")
         print(installed_version)

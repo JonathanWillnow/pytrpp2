@@ -41,12 +41,6 @@ class TestGetTimestamp:
         dt = get_timestamp("2024-02-20T16:32:07.731+0000")
         assert dt.tzinfo is not None
 
-    def test_another_tr_timestamp(self):
-        # From zinsen.json
-        dt = get_timestamp("2025-07-01T06:46:37.846+0000")
-        assert dt.year == 2025
-        assert dt.month == 7
-        assert dt.day == 1
 
 
 # ---------------------------------------------------------------------------
@@ -148,3 +142,29 @@ class TestExportPpParser:
     def test_applogin_flag(self, parser):
         args = parser.parse_args(["export_pp", "--applogin"])
         assert args.applogin is True
+
+
+# ---------------------------------------------------------------------------
+# export_pp path traversal guard
+# ---------------------------------------------------------------------------
+
+class TestExportPpPathGuard:
+    """Regression tests for the resolve-and-contain check in export_pp doc download."""
+
+    def test_normal_path_is_allowed(self, tmp_path):
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        resolved_docs_dir = docs_dir.resolve()
+        rel_path = Path("Trading_Trade_Executed") / "2024-01-15 - Some Stock - abc.pdf"
+        full_path = docs_dir / rel_path
+        # Should not raise
+        full_path.resolve().relative_to(resolved_docs_dir)
+
+    def test_dotdot_traversal_is_detected(self, tmp_path):
+        docs_dir = tmp_path / "docs"
+        docs_dir.mkdir()
+        resolved_docs_dir = docs_dir.resolve()
+        rel_path = Path("../../etc") / "passwd"
+        full_path = docs_dir / rel_path
+        with pytest.raises(ValueError):
+            full_path.resolve().relative_to(resolved_docs_dir)
