@@ -3,21 +3,20 @@ requires = ["hatchling", "hatch-babel"]
 build-backend = "hatchling.build"
 
 [project]
-name = "pytr"
-version = "0.4.6"
-description = "Use TradeRepublic in terminal"
+name = "pytrpp2"
+version = "0.1.0"
+description = "Trade Republic data exporter with Portfolio Performance support — fork of pytr"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [
-    { name = "marzzzello", email = "853485-marzzzello@users.noreply.gitlab.com" }
+    { name = "JonathanWillnow" }
 ]
-urls = { "Homepage" = "https://github.com/pytr-org/pytr" }
 classifiers = [
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3 :: Only",
     "Operating System :: OS Independent",
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Topic :: Office/Business :: Financial",
     "Topic :: Office/Business :: Financial :: Investment",
 ]
@@ -35,6 +34,11 @@ dependencies = [
     "shtab",
     "websockets>=14",
 ]
+
+[project.urls]
+Homepage = "https://github.com/JonathanWillnow/pytrpp2"
+"Bug Tracker" = "https://github.com/JonathanWillnow/pytrpp2/issues"
+Changelog = "https://github.com/JonathanWillnow/pytrpp2/releases"
 
 [project.scripts]
 pytrpp2 = "pytr.main:main"

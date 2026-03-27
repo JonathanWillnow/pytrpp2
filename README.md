@@ -1,7 +1,21 @@
 # pytrpp2: Trade Republic data exporter with Portfolio Performance support
 
+[![CI](https://github.com/JonathanWillnow/pytrpp2/actions/workflows/ci.yml/badge.svg)](https://github.com/JonathanWillnow/pytrpp2/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/pytrpp2)](https://pypi.org/project/pytrpp2/)
+[![Python](https://img.shields.io/pypi/pyversions/pytrpp2)](https://pypi.org/project/pytrpp2/)
+[![License](https://img.shields.io/github/license/JonathanWillnow/pytrpp2)](LICENSE)
+
 This is a tool for the private API of the Trade Republic online brokerage.
 This package and its authors are not affiliated with Trade Republic Bank GmbH.
+
+---
+
+## Credits and lineage
+
+pytrpp2 builds on the work of two projects:
+
+- [`pytr`](https://github.com/pytr-org/pytr) — the actively maintained Trade Republic API client that pytrpp2 forks. All core functionality (timeline download, document download, transaction export, price alarms, etc.) comes from pytr.
+- [`pytrpp`](https://github.com/MartinScharrer/pytrpp) by Martin Scharrer — an earlier extension of pytr that pioneered Portfolio Performance CSV export for Trade Republic data. pytrpp appears to be inactive, so pytrpp2 picks up that work: the PP-specific conversion logic (`export_pp`, `build_classification`, `check_mappings`) is ported and extended from pytrpp.
 
 ---
 
@@ -23,18 +37,8 @@ The CSV format produced by `export_pp` matches exactly what Portfolio Performanc
 
 ## Installation
 
-Install from this repository:
-
 ```sh
-pip install git+https://github.com/your-org/pytrpp2.git
-```
-
-Or clone and install in editable mode for development:
-
-```sh
-git clone https://github.com/your-org/pytrpp2.git
-cd pytrpp2
-pip install -e .
+pip install pytrpp2
 ```
 
 ---
@@ -186,62 +190,30 @@ Output:
 
 ## Authentication
 
-### Web login (default)
+Authentication works the same as in pytr. See [pytr's README](https://github.com/pytr-org/pytr#authentication) for details on web login, app login, and the credentials file.
 
-Web login simulates a browser session using [app.traderepublic.com](https://app.traderepublic.com/). After entering your phone number and PIN, you will receive a four-digit code in the TradeRepublic app or via SMS. You may need to re-enter a code periodically when the session cookie expires.
-
-### App login
-
-App login uses the same method as the mobile app. Pass `--applogin` to use it. On first use, a device reset is performed — a private key is generated and saved locally. **This will log you out of your mobile device.**
-
-```sh
-pytrpp2 login --applogin
-```
-
-### AWS WAF token
-
-Since early 2026 Trade Republic requires an `aws-waf-token` cookie on all auth endpoints. pytrpp2 handles this automatically during web login. If automatic detection fails, you can paste a token copied from your browser session:
+pytrpp2 additionally supports `--waf-token` on all subcommands. Since early 2026 Trade Republic requires an `aws-waf-token` cookie; pytrpp2 fetches it automatically during web login. If automatic detection fails, paste a token copied from your browser session:
 
 ```sh
 pytrpp2 export_pp --waf-token <token> ...
 ```
 
-### Credentials file
-
-If you omit `-n` and `-p`, pytrpp2 reads from `~/.pytr/credentials`:
-
-```
-+49123456789
-1234
-```
-
-Pass `--store_credentials` to save credentials automatically after a successful login.
-
 ---
 
 ## Development
 
-### Setup
+See [pytr's README](https://github.com/pytr-org/pytr#development) for general setup, linting, and formatting instructions — the toolchain is identical (`uv`, `ruff`, `mypy`).
+
+Clone and install this fork:
 
 ```sh
-git clone https://github.com/your-org/pytrpp2.git
+git clone https://github.com/JonathanWillnow/pytrpp2.git
 cd pytrpp2
-pip install -e ".[dev]"
+uv sync --group dev
+uv run pytest
 ```
 
-### Run tests
-
-```sh
-pytest tests/
-```
-
-### Linting and formatting
-
-```sh
-ruff format
-ruff check --fix-only
-mypy .
-```
+A pre-commit hook runs the full test suite automatically before every commit.
 
 ---
 
