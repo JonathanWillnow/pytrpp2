@@ -8,7 +8,6 @@
 This is a tool for the private API of the Trade Republic online brokerage.
 This package and its authors are not affiliated with Trade Republic Bank GmbH.
 
----
 
 ## Credits and lineage
 
@@ -17,7 +16,6 @@ pytrpp2 builds on the work of two projects:
 - [`pytr`](https://github.com/pytr-org/pytr) — the actively maintained Trade Republic API client that pytrpp2 forks. All core functionality (timeline download, document download, transaction export, price alarms, etc.) comes from pytr.
 - [`pytrpp`](https://github.com/MartinScharrer/pytrpp) by Martin Scharrer — an earlier extension of pytr that pioneered Portfolio Performance CSV export for Trade Republic data. pytrpp appears to be inactive, so pytrpp2 picks up that work: the PP-specific conversion logic (`export_pp`, `build_classification`, `check_mappings`) is ported and extended from pytrpp.
 
----
 
 ## What pytrpp2 adds compared to pytr
 
@@ -33,7 +31,6 @@ The CSV format produced by `export_pp` matches exactly what Portfolio Performanc
 - `payments.csv` → *Account Transactions* (dividends, interest, coupons, bond repayments, transfers)
 - `orders.csv` → *Portfolio Transactions* (buy / sell / savings plan orders)
 
----
 
 ## Installation
 
@@ -43,7 +40,6 @@ Requires Python 3.10 or newer.
 pip install pytrpp2
 ```
 
----
 
 ## export_pp — Portfolio Performance export
 
@@ -115,7 +111,6 @@ Date range (both default to 0 = include everything):
 
 After conversion, `export_pp` automatically runs a mapping gap check (see `check_mappings` below) and prints event counts.
 
----
 
 ## WIP - build_classification — Asset Allocation taxonomy
 
@@ -150,7 +145,6 @@ Valid keys: `RISKY` (Risikobehafteter Portfolioteil) and `CASH` (Risikoarmer Ant
 
 If `--config` is not provided, pytrpp2 looks for `~/.pytr/classifications_config.json` automatically.
 
----
 
 ## check_mappings — Gap detector
 
@@ -167,13 +161,11 @@ Output:
 
 `export_pp` runs this check automatically after every conversion, so you only need to call it manually to re-check an older events JSON.
 
----
 
 ## Authentication
 
 Authentication works the same as in pytr. See [pytr's README](https://github.com/pytr-org/pytr#authentication) for details on web login, app login, and the credentials file.
 
----
 
 ## Development
 
@@ -190,13 +182,11 @@ uv run pytest
 
 A pre-commit hook runs the full test suite automatically before every commit.
 
----
 
 ## Bugs and contributing
 
 For bugs or feature requests in the PP-specific functionality (`export_pp`, `build_classification`, `check_mappings`), open an issue in this repository. For issues with core Trade Republic API behaviour, do not forget to report them [upstream in pytr](https://github.com/pytr-org/pytr/issues).
 
----
 
 ## License
 
