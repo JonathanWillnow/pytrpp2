@@ -279,8 +279,7 @@ def _run_export_pp(argv, *, fake_tl_events=None, fake_downloader=None):
     captured = {}
 
     class FakeTimeline:
-        def __init__(self, tr, output_path, not_before=0, not_after=float("inf"),
-                     store_event_database=True, **kw):
+        def __init__(self, tr, output_path, not_before=0, not_after=float("inf"), store_event_database=True, **kw):
             captured["store_event_database"] = store_event_database
             self.events = list(fake_tl_events)
 
@@ -313,6 +312,7 @@ def _run_export_pp(argv, *, fake_tl_events=None, fake_downloader=None):
 def _nested(*cms):
     """Enter a stack of context managers (poor-man's contextlib.ExitStack)."""
     from contextlib import ExitStack
+
     stack = ExitStack()
     for cm in cms:
         stack.enter_context(cm)
@@ -335,21 +335,36 @@ class TestExportPpIncrementalDocDownloadRegression:
         """Timeline must be constructed with store_event_database=False so that
         tl.events is never merged with the historical all_events.json database."""
         (tmp_path / "2024-01-01_00-00-00").mkdir()
-        captured = _run_export_pp([
-            "pytrpp2", "export_pp",
-            "-n", "+49123456789", "-p", "1234",
-            "-D", str(tmp_path), "--incremental",
-        ])
+        captured = _run_export_pp(
+            [
+                "pytrpp2",
+                "export_pp",
+                "-n",
+                "+49123456789",
+                "-p",
+                "1234",
+                "-D",
+                str(tmp_path),
+                "--incremental",
+            ]
+        )
         assert captured.get("store_event_database") is False
 
     def test_store_event_database_is_false_without_incremental(self, tmp_path):
         """store_event_database=False must also hold for non-incremental runs —
         export_pp writes its own per-run events.json and must not touch all_events.json."""
-        captured = _run_export_pp([
-            "pytrpp2", "export_pp",
-            "-n", "+49123456789", "-p", "1234",
-            "-D", str(tmp_path),
-        ])
+        captured = _run_export_pp(
+            [
+                "pytrpp2",
+                "export_pp",
+                "-n",
+                "+49123456789",
+                "-p",
+                "1234",
+                "-D",
+                str(tmp_path),
+            ]
+        )
         assert captured.get("store_event_database") is False
 
     def test_only_tl_events_are_queued_for_download(self, tmp_path):
@@ -368,15 +383,19 @@ class TestExportPpIncrementalDocDownloadRegression:
             "title": "Buy",
             "subtitle": "MSCI World",
             "details": {
-                "sections": [{
-                    "type": "documents",
-                    "data": [{
-                        "id": "d1",
-                        "title": "Abrechnung",
-                        "detail": "15.01.2026",
-                        "action": {"payload": "https://example.com/new.pdf"},
-                    }],
-                }]
+                "sections": [
+                    {
+                        "type": "documents",
+                        "data": [
+                            {
+                                "id": "d1",
+                                "title": "Abrechnung",
+                                "detail": "15.01.2026",
+                                "action": {"payload": "https://example.com/new.pdf"},
+                            }
+                        ],
+                    }
+                ]
             },
         }
 
@@ -394,10 +413,16 @@ class TestExportPpIncrementalDocDownloadRegression:
 
         _run_export_pp(
             [
-                "pytrpp2", "export_pp",
-                "-n", "+49123456789", "-p", "1234",
-                "-D", str(tmp_path),
-                "-F", str(tmp_path / "docs"),
+                "pytrpp2",
+                "export_pp",
+                "-n",
+                "+49123456789",
+                "-p",
+                "1234",
+                "-D",
+                str(tmp_path),
+                "-F",
+                str(tmp_path / "docs"),
                 "--incremental",
             ],
             fake_tl_events=[new_event],
