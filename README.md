@@ -37,34 +37,10 @@ The CSV format produced by `export_pp` matches exactly what Portfolio Performanc
 
 ## Installation
 
+Requires Python 3.10 or newer.
+
 ```sh
 pip install pytrpp2
-```
-
----
-
-## Commands
-
-The CLI entry point is `pytrpp2`. Run `pytrpp2 --help` or `pytrpp2 <command> --help` for details.
-
-```
-Commands:
-  login                 Check credentials and log in (performs device reset if needed)
-  portfolio             Show current portfolio
-  details               Get details for an ISIN
-  dl_docs               Download all PDF documents from the timeline
-  export_transactions   Export timeline transactions to CSV
-  get_price_alarms      Get current price alarms
-  set_price_alarms      Set new price alarms
-  export_pp             Export TR timeline to Portfolio Performance CSV format  ← added by pytrpp2
-  build_classification  Build a Portfolio Performance classification taxonomy   ← added by pytrpp2
-  check_mappings        Check for unmapped TR event types in an events JSON     ← added by pytrpp2
-  completion            Print shell tab completion
-
-Global options:
-  -h, --help                            show this help message and exit
-  -V, --version                         Print version information and quit
-  -v, --verbosity {warning,info,debug}  Set verbosity level (default: info)
 ```
 
 ---
@@ -141,7 +117,7 @@ After conversion, `export_pp` automatically runs a mapping gap check (see `check
 
 ---
 
-## build_classification — Asset Allocation taxonomy
+## WIP - build_classification — Asset Allocation taxonomy
 
 Reads the events JSON from `export_pp` and generates a `classification.json` for Portfolio Performance's *Klassifizierungen* feature. It collects every security ISIN from your transaction history and assigns each one to a category based on an optional config file.
 
@@ -197,12 +173,6 @@ Output:
 
 Authentication works the same as in pytr. See [pytr's README](https://github.com/pytr-org/pytr#authentication) for details on web login, app login, and the credentials file.
 
-pytrpp2 additionally supports `--waf-token` on all subcommands. Since early 2026 Trade Republic requires an `aws-waf-token` cookie; pytrpp2 fetches it automatically during web login. If automatic detection fails, paste a token copied from your browser session:
-
-```sh
-pytrpp2 export_pp --waf-token <token> ...
-```
-
 ---
 
 ## Development
@@ -219,6 +189,12 @@ uv run pytest
 ```
 
 A pre-commit hook runs the full test suite automatically before every commit.
+
+---
+
+## Bugs and contributing
+
+For bugs or feature requests in the PP-specific functionality (`export_pp`, `build_classification`, `check_mappings`), open an issue in this repository. For issues with core Trade Republic API behaviour, do not forget to report them [upstream in pytr](https://github.com/pytr-org/pytr/issues).
 
 ---
 

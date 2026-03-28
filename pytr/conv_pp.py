@@ -211,6 +211,7 @@ class TransactionEvent(Event):
                     return {data["title"]: data["detail"]["text"] for data in section["data"]}
         except KeyError:
             return None
+        return None
 
 
 class Unknown(Event):
@@ -244,7 +245,7 @@ class Investment(TransactionEvent):
 
     def __init__(self, event: dict):
         self.dt: datetime = get_timestamp(event["timestamp"])
-        self.value: Amount = amount(event)
+        self.value: Amount | None = amount(event)  # type: ignore[assignment]
         if event.get("title", "").startswith("Anleihe"):
             self.note = "Anleihe"
         self.isin: str = self.get_isin(event)
@@ -254,7 +255,7 @@ class Investment(TransactionEvent):
         self.costs = transaction.get("Gebühr", Amount.zero())
         if self.value is None:
             self.value = transaction.get("Gesamt", Amount.zero())
-        overview = self.get_section(event, "Übersicht")
+        overview = self.get_section(event, "Übersicht") or {}
         for t in ("Asset", "Anteil"):
             self.name = overview.get(t)
             if self.name is not None:
@@ -262,11 +263,12 @@ class Investment(TransactionEvent):
         try:
             self.type
         except AttributeError:
+            ty: str | None = None
             for t in ("Ordertyp", "Orderart", "Auftragsart"):
                 ty = overview.get(t)
                 if ty is not None:
                     break
-            self.type = self.TYPES.get(ty, ty)
+            self.type = self.TYPES.get(ty, ty) if ty is not None else "Kauf"
         self.shares = transaction.get("Anteile")
         if self.shares is None:
             self.shares = 1
@@ -290,7 +292,7 @@ class Payment(Event):
 
     def __init__(self, event: dict):
         self.dt: datetime = get_timestamp(event["timestamp"])
-        self.value: Amount = amount(event)
+        self.value: Amount | None = amount(event)  # type: ignore[assignment]
 
     def csv(self, sep=";", decimal=","):
         dt = self.dt.astimezone()
@@ -335,7 +337,7 @@ class SecuritiesTransferOutgoing(Investment):
     def __init__(self, event: dict):
         self.dt: datetime = get_timestamp(event["timestamp"])
         self.isin: str = self.get_isin(event)
-        overview = self.get_section(event, "Übersicht", "Overview")
+        overview = self.get_section(event, "Übersicht", "Overview") or {}
         for t in ("Asset", "Anteil"):
             self.name = overview.get(t)
             if self.name is not None:
@@ -533,7 +535,7 @@ class NewStyleOrder(Investment):
         except Exception:
             self.costs = Amount.zero()
         self.taxes = Amount.zero()
-        self.value = amount(event)
+        self.value = amount(event)  # type: ignore[assignment]
         if self.value is not None:
             self.value = Amount(abs(self.value.value), self.value.currency)
         transaction_text = overview.get("Transaktion", "")

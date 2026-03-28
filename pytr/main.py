@@ -757,7 +757,12 @@ def main():
         )
 
         output_path = args.dir if args.dir else Path(".")
-        tl = Timeline(tr, output_path, not_before, not_after)
+        # store_event_database=False: export_pp writes its own per-run events.json and
+        # must not merge tl.events with all_events.json. Without this flag,
+        # finish_timeline_details() replaces tl.events with the full historical set,
+        # causing the doc-download loop to re-queue every historical PDF even in
+        # --incremental mode.
+        tl = Timeline(tr, output_path, not_before, not_after, store_event_database=False)
         asyncio.run(tl.tl_loop())
         events = tl.events
 

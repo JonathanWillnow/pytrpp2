@@ -21,12 +21,13 @@ and add entries to override individual ISINs.
 import json
 import re
 from pathlib import Path
+from typing import Any
 
 _RE_ISIN = re.compile(r"^[A-Z]{2}-?[\dA-Z]{9}-?\d$")
 
 DEFAULT_CONFIG_PATH = Path.home() / ".pytr" / "classifications_config.json"
 
-TAXONOMY = {
+TAXONOMY: dict[str, Any] = {
     "name": "Asset Allocation",
     "categories": [
         {

@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from requests import session
-from requests_futures.sessions import FuturesSession
+from requests_futures.sessions import FuturesSession  # type: ignore[import-untyped]
 
 
 def get_timestamp(ts: str) -> datetime:

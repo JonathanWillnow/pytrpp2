@@ -3,7 +3,9 @@ Tests for pytr.trdl_pp — get_timestamp and Downloader.
 Tests for pytr.main — export_pp argument parser.
 """
 
+import sys
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -259,3 +261,148 @@ class TestExportPpIncrementalParser:
         args = parser.parse_args(["export_pp", "--incremental", "-D", "/tmp/out"])
         assert args.incremental is True
         assert args.dir == Path("/tmp/out")
+
+
+# ---------------------------------------------------------------------------
+# export_pp incremental doc-download regression
+# ---------------------------------------------------------------------------
+
+
+def _run_export_pp(argv, *, fake_tl_events=None, fake_downloader=None):
+    """Invoke main() with mocked login / Timeline / Converter and return captured data."""
+    import pytr.main as m
+    import pytr.utils as u
+
+    if fake_tl_events is None:
+        fake_tl_events = []
+
+    captured = {}
+
+    class FakeTimeline:
+        def __init__(self, tr, output_path, not_before=0, not_after=float("inf"),
+                     store_event_database=True, **kw):
+            captured["store_event_database"] = store_event_database
+            self.events = list(fake_tl_events)
+
+        async def tl_loop(self):
+            pass
+
+    patches = [
+        patch("pytr.main.login", return_value=MagicMock()),
+        patch("pytr.main.Timeline", FakeTimeline),
+        patch("pytr.main.Converter"),
+        patch("pytr.main.print_gap_report"),
+    ]
+    if fake_downloader is not None:
+        patches.append(patch("pytr.main.PPDownloader", fake_downloader))
+
+    old_argv = sys.argv
+    old_log_level = u.log_level
+    sys.argv = argv
+    try:
+        with _nested(*patches):
+            u.log_level = None  # allow main() to set verbosity each call
+            m.main()
+    finally:
+        sys.argv = old_argv
+        u.log_level = old_log_level
+
+    return captured
+
+
+def _nested(*cms):
+    """Enter a stack of context managers (poor-man's contextlib.ExitStack)."""
+    from contextlib import ExitStack
+    stack = ExitStack()
+    for cm in cms:
+        stack.enter_context(cm)
+    return stack
+
+
+class TestExportPpIncrementalDocDownloadRegression:
+    """
+    Regression: export_pp --incremental must not re-download PDFs for historical events.
+
+    Root cause: Timeline.finish_timeline_details() reads all_events.json and merges it
+    into tl.events when store_event_database=True (the default).  In incremental mode
+    this inflates tl.events with the full historical event set, so the doc-download loop
+    re-queues every historical PDF on every run.
+
+    Fix: export_pp passes store_event_database=False to Timeline.
+    """
+
+    def test_store_event_database_is_false(self, tmp_path):
+        """Timeline must be constructed with store_event_database=False so that
+        tl.events is never merged with the historical all_events.json database."""
+        (tmp_path / "2024-01-01_00-00-00").mkdir()
+        captured = _run_export_pp([
+            "pytrpp2", "export_pp",
+            "-n", "+49123456789", "-p", "1234",
+            "-D", str(tmp_path), "--incremental",
+        ])
+        assert captured.get("store_event_database") is False
+
+    def test_store_event_database_is_false_without_incremental(self, tmp_path):
+        """store_event_database=False must also hold for non-incremental runs —
+        export_pp writes its own per-run events.json and must not touch all_events.json."""
+        captured = _run_export_pp([
+            "pytrpp2", "export_pp",
+            "-n", "+49123456789", "-p", "1234",
+            "-D", str(tmp_path),
+        ])
+        assert captured.get("store_event_database") is False
+
+    def test_only_tl_events_are_queued_for_download(self, tmp_path):
+        """Doc download must queue exactly the documents from tl.events — no more.
+
+        This guards against the merge bug: if store_event_database=True were
+        accidentally restored, finish_timeline_details() would replace tl.events
+        with the full historical set and all historical PDFs would be re-downloaded.
+        """
+        (tmp_path / "2024-01-01_00-00-00").mkdir()
+
+        new_event = {
+            "id": "evt-new",
+            "eventType": "TRADING_TRADE_EXECUTED",
+            "timestamp": "2026-01-15T10:00:00.000+0000",
+            "title": "Buy",
+            "subtitle": "MSCI World",
+            "details": {
+                "sections": [{
+                    "type": "documents",
+                    "data": [{
+                        "id": "d1",
+                        "title": "Abrechnung",
+                        "detail": "15.01.2026",
+                        "action": {"payload": "https://example.com/new.pdf"},
+                    }],
+                }]
+            },
+        }
+
+        queued = []
+
+        class FakeDownloader:
+            def __init__(self, **kw):
+                pass
+
+            def dl(self, url, path, **kw):
+                queued.append(url)
+
+            def wait(self):
+                pass
+
+        _run_export_pp(
+            [
+                "pytrpp2", "export_pp",
+                "-n", "+49123456789", "-p", "1234",
+                "-D", str(tmp_path),
+                "-F", str(tmp_path / "docs"),
+                "--incremental",
+            ],
+            fake_tl_events=[new_event],
+            fake_downloader=FakeDownloader,
+        )
+
+        assert len(queued) == 1, f"expected 1 doc queued, got {len(queued)}: {queued}"
+        assert queued[0] == "https://example.com/new.pdf"

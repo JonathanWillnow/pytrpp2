@@ -148,3 +148,6 @@ uv.lock
 
 # Developer notes (not for public repo)
 dev_readme.md
+
+# Claude
+.claude/
