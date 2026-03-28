@@ -14,7 +14,7 @@ A clear and concise description of what the bug is.
 Steps to reproduce the behavior:
 
 1. Go to '...'
-2. Ran the command `pytr ....`
+2. Ran the command `pytrpp2 ....`
 3. Do '....'
 4. See error
 
@@ -31,7 +31,7 @@ here
 **Environment**
 
 - OS: [e.g. Linux]
-- pytr version: [e.g. `0.0.15`, use `pytr -V` to get your version]
+- pytrpp2 version: [e.g. `0.1.0`, use `pytrpp2 -V` to get your version]
 
 **Additional context**
 Add any other context about the problem here.
