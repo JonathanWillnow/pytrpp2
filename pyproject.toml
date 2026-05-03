@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "pytrpp2"
-version = "0.1.1"
+version = "0.1.2"
 description = "Trade Republic data exporter with Portfolio Performance support — fork of pytr"
 readme = "README.md"
 requires-python = ">=3.10"
