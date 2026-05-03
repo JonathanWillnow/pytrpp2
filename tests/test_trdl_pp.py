@@ -148,10 +148,6 @@ class TestExportPpParser:
         assert args.phone_no == "+49123456789"
         assert args.pin == "1234"
 
-    def test_applogin_flag(self, parser):
-        args = parser.parse_args(["export_pp", "--applogin"])
-        assert args.applogin is True
-
 
 # ---------------------------------------------------------------------------
 # export_pp path traversal guard

@@ -104,13 +104,12 @@ def get_main_parser():
 
     # parent subparser with common login arguments
     parser_login_args = argparse.ArgumentParser(add_help=False)
-    parser_login_args.add_argument("--applogin", help="Use app login instead of  web login", action="store_true")
     parser_login_args.add_argument("-n", "--phone_no", help="TradeRepublic phone number (international format)")
     parser_login_args.add_argument("-p", "--pin", help="TradeRepublic pin")
     parser_login_args.add_argument(
         "--waf-token",
-        help="Manually provide an aws-waf-token cookie value (copy from browser session)",
-        default=None,
+        help='AWS WAF token value or the method to obtain it. Values: "playwright", "awswaf" or a token string, e.g. an aws-waf-token cookie captured from a browser session.',
+        default="playwright",
     )
     parser_login_args.add_argument(
         "--store_credentials",
@@ -592,7 +591,6 @@ def main():
         login(
             phone_no=args.phone_no,
             pin=args.pin,
-            web=not args.applogin,
             store_credentials=args.store_credentials,
             waf_token=args.waf_token,
         )
@@ -601,7 +599,6 @@ def main():
             login(
                 phone_no=args.phone_no,
                 pin=args.pin,
-                web=not args.applogin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
             ),
@@ -618,7 +615,6 @@ def main():
             login(
                 phone_no=args.phone_no,
                 pin=args.pin,
-                web=not args.applogin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
             ),
@@ -629,7 +625,6 @@ def main():
             login(
                 phone_no=args.phone_no,
                 pin=args.pin,
-                web=not args.applogin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
             ),
@@ -659,7 +654,6 @@ def main():
             login(
                 phone_no=args.phone_no,
                 pin=args.pin,
-                web=not args.applogin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
             ),
@@ -694,7 +688,6 @@ def main():
                 login(
                     phone_no=args.phone_no,
                     pin=args.pin,
-                    web=not args.applogin,
                     store_credentials=args.store_credentials,
                     waf_token=args.waf_token,
                 ),
@@ -710,7 +703,6 @@ def main():
                 login(
                     phone_no=args.phone_no,
                     pin=args.pin,
-                    web=not args.applogin,
                     store_credentials=args.store_credentials,
                     waf_token=args.waf_token,
                 ),
@@ -751,7 +743,6 @@ def main():
         tr = login(
             phone_no=args.phone_no,
             pin=args.pin,
-            web=not args.applogin,
             store_credentials=args.store_credentials,
             waf_token=args.waf_token,
         )
