@@ -17,7 +17,6 @@ import shtab
 from pytr.account import login
 from pytr.alarms import Alarms
 from pytr.check_mappings_pp import print_gap_report
-from pytr.classify_pp import build as build_classification
 from pytr.conv_pp import Converter
 from pytr.details import Details
 from pytr.dl import DL
@@ -503,32 +502,6 @@ def get_main_parser():
         type=Path,
     )
 
-    # build_classification
-    info = "Build a Portfolio Performance Klassifizierung taxonomy JSON from an events.json file"
-    parser_build_classification = parser_cmd.add_parser(
-        "build_classification",
-        formatter_class=formatter,
-        help=info,
-        description=info,
-    )
-    parser_build_classification.add_argument(
-        "events_file",
-        help="Path to the raw events JSON (produced by export_pp -E or -D)",
-        type=Path,
-    )
-    parser_build_classification.add_argument(
-        "output_file",
-        help="Where to write the classification.json (e.g. classification.json)",
-        type=Path,
-    )
-    parser_build_classification.add_argument(
-        "--config",
-        dest="config_path",
-        help=("Path to classifications_config.json. Defaults to ~/.pytr/classifications_config.json if not given."),
-        type=Path,
-        default=None,
-    )
-
     # completion
     info = "Print shell tab completion"
     parser_completion = parser_cmd.add_parser(
@@ -841,8 +814,6 @@ def main():
             events = json.load(fh)
         print(f"check_mappings: {len(events)} events in {args.events_file.name}")
         print_gap_report(events)
-    elif args.command == "build_classification":
-        build_classification(args.events_file, args.output_file, args.config_path)
     elif args.version:
         installed_version = version("pytr")
         print(installed_version)

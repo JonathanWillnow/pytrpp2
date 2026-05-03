@@ -14,7 +14,7 @@ This package and its authors are not affiliated with Trade Republic Bank GmbH.
 pytrpp2 builds on the work of two projects:
 
 - [`pytr`](https://github.com/pytr-org/pytr) — the actively maintained Trade Republic API client that pytrpp2 forks. All core functionality (timeline download, document download, transaction export, price alarms, etc.) comes from pytr.
-- [`pytrpp`](https://github.com/MartinScharrer/pytrpp) by Martin Scharrer — an earlier extension of pytr that pioneered Portfolio Performance CSV export for Trade Republic data. pytrpp appears to be inactive, so pytrpp2 picks up that work: the PP-specific conversion logic (`export_pp`, `build_classification`, `check_mappings`) is ported and extended from pytrpp.
+- [`pytrpp`](https://github.com/MartinScharrer/pytrpp) by Martin Scharrer — an earlier extension of pytr that pioneered Portfolio Performance CSV export for Trade Republic data. pytrpp appears to be inactive, so pytrpp2 picks up that work: the PP-specific conversion logic (`export_pp`, `check_mappings`) is ported and extended from pytrpp.
 
 
 ## What pytrpp2 adds compared to pytr
@@ -24,7 +24,6 @@ pytrpp2 is a fork of [`pytr`](https://github.com/pytr-org/pytr) and includes all
 | Added subcommand | What it does |
 |---|---|
 | `export_pp` | Downloads your full TR timeline and converts it to Portfolio Performance-compatible CSV files (`payments.csv`, `orders.csv`). Handles all TR event types including the post-2025 API format. Optionally downloads PDF documents. |
-| `build_classification` | Reads the raw events JSON from `export_pp` and generates a `classification.json` taxonomy (Asset Allocation: RISKY / CASH) ready to import into Portfolio Performance under *Wertpapiere → Klassifizierungen*. |
 | `check_mappings` | Reads an events JSON and reports any TR event types that have no converter handler — useful after a Trade Republic API update to spot silent data loss before it happens. |
 
 The CSV format produced by `export_pp` matches exactly what Portfolio Performance expects:
@@ -112,40 +111,6 @@ Date range (both default to 0 = include everything):
 After conversion, `export_pp` automatically runs a mapping gap check (see `check_mappings` below) and prints event counts.
 
 
-## WIP - build_classification — Asset Allocation taxonomy
-
-Reads the events JSON from `export_pp` and generates a `classification.json` for Portfolio Performance's *Klassifizierungen* feature. It collects every security ISIN from your transaction history and assigns each one to a category based on an optional config file.
-
-```sh
-# Minimal — all ISINs default to RISKY:
-pytrpp2 build_classification /path/to/events.json classification.json
-
-# With explicit config:
-pytrpp2 build_classification /path/to/events.json classification.json --config /path/to/classifications_config.json
-```
-
-Import the result in Portfolio Performance under:
-> **Wertpapiere → Klassifizierungen → [taxonomy] → ⋮ → Importieren**
-
-### Config file format
-
-Copy `pytr/classifications_config.example.json` to `~/.pytr/classifications_config.json` and edit it:
-
-```json
-{
-  "classifications": {
-    "IE00B4L5Y983": "RISKY",
-    "IE00B3WJKG14": "CASH",
-    "DE0001030542": "CASH"
-  }
-}
-```
-
-Valid keys: `RISKY` (Risikobehafteter Portfolioteil) and `CASH` (Risikoarmer Anteil). ISINs not listed default to `RISKY`. After each run, any unconfigured ISINs are printed to the console.
-
-If `--config` is not provided, pytrpp2 looks for `~/.pytr/classifications_config.json` automatically.
-
-
 ## check_mappings — Gap detector
 
 Checks an events JSON for TR event types that have no handler in the converter. These would be silently dropped from `payments.csv` and `orders.csv` — typically caused by Trade Republic renaming or introducing event types after a platform update.
@@ -185,7 +150,7 @@ A pre-commit hook runs the full test suite automatically before every commit.
 
 ## Bugs and contributing
 
-For bugs or feature requests in the PP-specific functionality (`export_pp`, `build_classification`, `check_mappings`), open an issue in this repository. For issues with core Trade Republic API behaviour, do not forget to report them [upstream in pytr](https://github.com/pytr-org/pytr/issues).
+For bugs or feature requests in the PP-specific functionality (`export_pp`, `check_mappings`), open an issue in this repository. For issues with core Trade Republic API behaviour, do not forget to report them [upstream in pytr](https://github.com/pytr-org/pytr/issues).
 
 
 ## License
