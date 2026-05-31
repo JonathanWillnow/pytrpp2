@@ -802,12 +802,15 @@ class Converter:
         "SSP_CORPORATE_ACTION_ACTIVITY": Ignore,
         "SSP_CORPORATE_ACTION_NO_CASH": Ignore,
         "SSP_CORPORATE_ACTION_INFORMATIVE": Ignore,
+        "SSP_CORPORATE_ACTION_INSTRUCTION": Ignore,
         # New-name card
         "CARD_TRANSACTION": CardPayment,
         "CARD_AFT": CardPayment,  # final settlement of a card charge
         "CARD_VERIFICATION": Ignore,  # pre-auth check, no money movement
         "CARD_REFUND": NewStyleCardRefund,
         # --- Account / admin ---
+        "ADDRESS_CHANGED": Ignore,
+        "CASH_ACCOUNT_CHANGED": Ignore,
         "PUK_CREATED": Ignore,
         "CUSTOMER_CREATED": Ignore,
         "SECURITIES_ACCOUNT_CREATED": Ignore,
@@ -834,6 +837,8 @@ class Converter:
         # --- Taxes ---
         "EXEMPTION_ORDER_CHANGED": Ignore,
         "EXEMPTION_ORDER_CHANGE_REQUESTED": Ignore,
+        "EXEMPTION_ORDER_CHANGE_REQUESTED_AUTOMATICALLY": Ignore,
+        "EXEMPTION_ORDER_CREATED": Ignore,
         "TAX_REFUND": TaxRefund,
         "ssp_tax_correction_invoice": TaxRefund,
         "TAX_YEAR_END_REPORT": Ignore,

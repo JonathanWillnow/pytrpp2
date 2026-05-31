@@ -640,3 +640,19 @@ class TestNewEventTypeMappings:
 
     def test_tax_year_end_report_created_is_ignored(self):
         assert Converter().process([self._simple("TAX_YEAR_END_REPORT_CREATED")]) == []
+
+    # Regression: types seen in the wild that were previously unmapped gaps
+    def test_ssp_corporate_action_instruction_is_ignored(self):
+        assert Converter().process([self._simple("SSP_CORPORATE_ACTION_INSTRUCTION")]) == []
+
+    def test_address_changed_is_ignored(self):
+        assert Converter().process([self._simple("ADDRESS_CHANGED")]) == []
+
+    def test_cash_account_changed_is_ignored(self):
+        assert Converter().process([self._simple("CASH_ACCOUNT_CHANGED")]) == []
+
+    def test_exemption_order_change_requested_automatically_is_ignored(self):
+        assert Converter().process([self._simple("EXEMPTION_ORDER_CHANGE_REQUESTED_AUTOMATICALLY")]) == []
+
+    def test_exemption_order_created_is_ignored(self):
+        assert Converter().process([self._simple("EXEMPTION_ORDER_CREATED")]) == []
