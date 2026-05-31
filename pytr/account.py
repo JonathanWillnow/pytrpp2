@@ -4,6 +4,7 @@ import time
 from getpass import getpass
 
 from pygments import formatters, highlight, lexers
+from requests.exceptions import HTTPError
 
 from .api import BASE_DIR, CREDENTIALS_FILE, TradeRepublicApi
 from .utils import get_logger
@@ -58,6 +59,12 @@ def login(phone_no=None, pin=None, store_credentials=False, waf_token="playwrigh
     if not tr.resume_websession():
         try:
             countdown = tr.initiate_weblogin()
+        except HTTPError as e:
+            if e.response is not None and e.response.status_code == 429:
+                log.fatal("Trade Republic rate-limited this request (HTTP 429). Please wait ~1 minute and try again.")
+            else:
+                log.fatal(str(e))
+            sys.exit(1)
         except ValueError as e:
             log.fatal(str(e))
             sys.exit(1)
