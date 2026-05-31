@@ -570,6 +570,16 @@ class TestCardPayment:
         result = Converter().process([event])[0]
         assert result.type == "Entnahme"
 
+    def test_card_payment_note_includes_title(self):
+        event = {**self._make_card_event("CARD_TRANSACTION", -50), "title": "Lidl"}
+        result = Converter().process([event])[0]
+        assert result.note == "Konsum - Lidl"
+
+    def test_card_refund_note_includes_title(self):
+        event = {**self._make_card_event("CARD_REFUND", 20), "title": "Amazon"}
+        result = Converter().process([event])[0]
+        assert result.note == "Konsum - Amazon"
+
     def test_card_refund_value_is_positive(self):
         event = self._make_card_event("CARD_REFUND", -20)
         result = Converter().process([event])[0]

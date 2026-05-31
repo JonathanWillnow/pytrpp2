@@ -595,6 +595,7 @@ class CardPayment(Payment):
 
     def __init__(self, event: dict):
         super().__init__(event)
+        self.note = f"Konsum - {event.get('title', '')}"
         if self.value is not None:
             self.value = Amount(abs(self.value.value), self.value.currency)
 
@@ -623,6 +624,7 @@ class NewStyleCardRefund(Payment):
 
     def __init__(self, event: dict):
         super().__init__(event)
+        self.note = f"Konsum - {event.get('title', '')}"
         if self.value is not None:
             self.value = Amount(abs(self.value.value), self.value.currency)
 
