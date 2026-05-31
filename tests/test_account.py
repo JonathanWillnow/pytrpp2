@@ -1,6 +1,5 @@
 """Tests for pytr/account.py."""
 
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
