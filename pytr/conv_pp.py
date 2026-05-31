@@ -599,6 +599,18 @@ class CardPayment(Payment):
             self.value = Amount(abs(self.value.value), self.value.currency)
 
 
+def card_payment_or_ignore(event: dict) -> Event:
+    """Factory for CARD_TRANSACTION and CARD_AFT.
+
+    Rejected and cancelled transactions carry no actual money movement and must
+    not appear in payments.csv.  Only the subtitle distinguishes them from real
+    charges at the event-type level.
+    """
+    if (event.get("subtitle") or "") in ("Abgelehnt", "Abgebrochen"):
+        return Ignore(event)
+    return CardPayment(event)
+
+
 class NewStyleCardRefund(Payment):
     """Handler for CARD_REFUND (money returned after a card transaction).
 
@@ -804,8 +816,8 @@ class Converter:
         "SSP_CORPORATE_ACTION_INFORMATIVE": Ignore,
         "SSP_CORPORATE_ACTION_INSTRUCTION": Ignore,
         # New-name card
-        "CARD_TRANSACTION": CardPayment,
-        "CARD_AFT": CardPayment,  # final settlement of a card charge
+        "CARD_TRANSACTION": card_payment_or_ignore,
+        "CARD_AFT": card_payment_or_ignore,  # final settlement of a card charge
         "CARD_VERIFICATION": Ignore,  # pre-auth check, no money movement
         "CARD_REFUND": NewStyleCardRefund,
         # --- Account / admin ---

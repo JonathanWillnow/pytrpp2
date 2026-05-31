@@ -585,6 +585,21 @@ class TestCardPayment:
         results = Converter().process([event])
         assert results == []
 
+    # Regression: rejected/cancelled card transactions must not appear in payments.csv
+    def test_card_transaction_abgelehnt_ignored(self):
+        event = {**self._make_card_event("CARD_TRANSACTION", -50), "subtitle": "Abgelehnt"}
+        assert Converter().process([event]) == []
+
+    def test_card_transaction_abgebrochen_ignored(self):
+        event = {**self._make_card_event("CARD_TRANSACTION", -50), "subtitle": "Abgebrochen"}
+        assert Converter().process([event]) == []
+
+    def test_card_transaction_no_subtitle_is_payment(self):
+        event = self._make_card_event("CARD_TRANSACTION", -50)
+        results = Converter().process([event])
+        assert len(results) == 1
+        assert isinstance(results[0], Payment)
+
 
 # ---------------------------------------------------------------------------
 # New event type dispatch — bank transfers and new Ignores
