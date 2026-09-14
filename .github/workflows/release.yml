@@ -15,13 +15,21 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
+    env:
+      # Use the interpreter from setup-python instead of letting uv download one: setup-uv runs
+      # that download silently, so a failed download only showed "uv failed with exit code 1".
+      UV_PYTHON: ${{ matrix.python-version }}
+      UV_PYTHON_DOWNLOADS: never
     steps:
       - uses: actions/checkout@v4
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Install uv
         uses: astral-sh/setup-uv@v5
         with:
           version: ${{ env.UV_VERSION }}
-          python-version: ${{ matrix.python-version }}
       - name: Run tests
         run: uv run pytest
       - name: Ruff lint
