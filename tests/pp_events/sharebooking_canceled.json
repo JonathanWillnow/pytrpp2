@@ -1,0 +1,82 @@
+{
+  "id": "00000000-0000-4000-8000-000000000005",
+  "timestamp": "2023-10-19T21:35:37.706+0000",
+  "title": "Veralto",
+  "icon": "logos/US92338C1036/v2",
+  "subtitle": "Kapitalmaßnahme",
+  "action": {
+    "type": "timelineDetail",
+    "payload": "00000000-0000-4000-8000-000000000005"
+  },
+  "trailing": null,
+  "eventType": "SHAREBOOKING_CANCELED",
+  "hidden": false,
+  "deleted": false,
+  "source": "timelineActivity",
+  "details": {
+    "id": "00000000-0000-4000-8000-000000000005",
+    "sections": [
+      {
+        "title": "Du hast an einem Spinoff teilgenommen",
+        "data": {
+          "icon": "logos/US92338C1036/v2",
+          "subtitleText": null,
+          "timestamp": "2023-10-19T21:35:37.706+0000",
+          "status": "canceled"
+        },
+        "action": {
+          "type": "instrumentDetail",
+          "payload": "US92338C1036"
+        },
+        "type": "header"
+      },
+      {
+        "title": "Übersicht",
+        "data": [
+          {
+            "title": "Ereignis",
+            "detail": {
+              "text": "Entflechtung",
+              "trend": null,
+              "action": null,
+              "displayValue": null,
+              "type": "text"
+            },
+            "style": "plain"
+          },
+          {
+            "title": "Ausgebuchte Anteile",
+            "detail": {
+              "text": "Veralto Corp.",
+              "trend": null,
+              "action": null,
+              "displayValue": null,
+              "type": "text"
+            },
+            "style": "plain"
+          }
+        ],
+        "action": null,
+        "type": "table"
+      },
+      {
+        "title": "Transaktion",
+        "data": [
+          {
+            "title": "Ausgebuchte Anteile",
+            "detail": {
+              "text": "1",
+              "trend": null,
+              "action": null,
+              "displayValue": null,
+              "type": "text"
+            },
+            "style": "highlighted"
+          }
+        ],
+        "action": null,
+        "type": "table"
+      }
+    ]
+  }
+}

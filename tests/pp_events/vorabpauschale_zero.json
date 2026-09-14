@@ -1,0 +1,60 @@
+{
+  "id": "00000000-0000-4000-8000-000000000006",
+  "timestamp": "2026-01-28T15:28:32.184+0000",
+  "title": "Edge World Quality USD (Acc)",
+  "icon": "logos/IE00BP3QZ601/v2",
+  "subtitle": "Vorabpauschale",
+  "action": {
+    "type": "timelineDetail",
+    "payload": "00000000-0000-4000-8000-000000000006"
+  },
+  "trailing": null,
+  "eventType": "SSP_CORPORATE_ACTION_NO_CASH",
+  "hidden": false,
+  "deleted": false,
+  "source": "timelineActivity",
+  "details": {
+    "id": "00000000-0000-4000-8000-000000000006",
+    "sections": [
+      {
+        "title": "Deine Aktien waren von einer Kapitalmaßnahme betroffen",
+        "data": {
+          "icon": {
+            "asset": "logos/IE00BP3QZ601/v2",
+            "badge": null
+          },
+          "subtitleText": "28 Jan. · 15:28",
+          "status": "executed"
+        },
+        "type": "header"
+      },
+      {
+        "title": "Übersicht",
+        "data": [
+          {
+            "title": "Status",
+            "detail": {
+              "text": "Ausgeführt",
+              "functionalStyle": "EXECUTED",
+              "type": "status"
+            },
+            "style": "plain"
+          },
+          {
+            "title": "Orderart",
+            "detail": {
+              "text": "Vorabpauschale",
+              "displayValue": {
+                "text": "Vorabpauschale",
+                "textDataSensitivity": "PUBLIC"
+              },
+              "type": "text"
+            },
+            "style": "plain"
+          }
+        ],
+        "type": "table"
+      }
+    ]
+  }
+}

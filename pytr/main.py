@@ -33,23 +33,55 @@ from pytr.utils import check_version, get_logger
 _TS_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}$")
 
 
-def _find_last_run_timestamp(base_dir: Path) -> datetime | None:
-    """Return the datetime of the most recent timestamped export subfolder in base_dir, or None.
+# export_pp --incremental re-fetches this much before the last run. TR publishes some events
+# after their timestamp, and timeline.py compares UTC timestamps as local time; events that an
+# earlier run already exported are removed by id, so the overlap never produces duplicates.
+INCREMENTAL_OVERLAP = timedelta(days=7)
 
-    Scans base_dir for subdirectories whose names match YYYY-MM-DD_HH-MM-SS (the format
-    created by export_pp -D). Returns the latest one as a naive local datetime, or None if
-    no matching subdirectory exists or base_dir does not exist.
+
+def _completed_run_dirs(base_dir: Path) -> list[tuple[datetime, Path]]:
+    """Return (run start, folder) for every completed export_pp -D run in base_dir, oldest first.
+
+    A run folder is named YYYY-MM-DD_HH-MM-SS. It counts as completed only if it contains
+    events.json and at least one CSV — a run that failed (e.g. at login) leaves an empty
+    folder behind, which must not move the incremental start time forward.
     """
     if not base_dir.is_dir():
-        return None
-    candidates = []
+        return []
+    runs = []
     for entry in base_dir.iterdir():
-        if entry.is_dir() and _TS_PATTERN.match(entry.name):
-            try:
-                candidates.append(datetime.strptime(entry.name, "%Y-%m-%d_%H-%M-%S"))
-            except ValueError:
-                pass
-    return max(candidates) if candidates else None
+        if not (entry.is_dir() and _TS_PATTERN.match(entry.name)):
+            continue
+        if not (entry / "events.json").is_file():
+            continue
+        if not ((entry / "orders.csv").is_file() or (entry / "payments.csv").is_file()):
+            continue
+        try:
+            runs.append((datetime.strptime(entry.name, "%Y-%m-%d_%H-%M-%S"), entry))
+        except ValueError:
+            pass
+    return sorted(runs)
+
+
+def _find_last_run_timestamp(base_dir: Path) -> datetime | None:
+    """Return the start time (naive local) of the most recent completed export run, or None."""
+    runs = _completed_run_dirs(base_dir)
+    return runs[-1][0] if runs else None
+
+
+def _exported_event_ids(base_dir: Path) -> set[str]:
+    """Return the ids of all events written by completed export runs in base_dir."""
+    ids: set[str] = set()
+    for _, run_dir in _completed_run_dirs(base_dir):
+        try:
+            with open(run_dir / "events.json", encoding="utf-8") as fh:
+                ids.update(e["id"] for e in json.load(fh) if isinstance(e, dict) and "id" in e)
+        except (OSError, ValueError) as e:
+            raise RuntimeError(
+                f"Cannot read {run_dir / 'events.json'} ({e}). Incremental mode needs it to avoid "
+                "duplicate transactions; fix or remove that run folder."
+            ) from e
+    return ids
 
 
 def get_main_parser():
@@ -107,14 +139,38 @@ def get_main_parser():
     parser_login_args = argparse.ArgumentParser(add_help=False)
     parser_login_args.add_argument("-n", "--phone_no", help="TradeRepublic phone number (international format)")
     parser_login_args.add_argument("-p", "--pin", help="TradeRepublic pin")
-    parser_login_args.add_argument(
+    waf_group = parser_login_args.add_mutually_exclusive_group()
+    waf_group.add_argument(
         "--waf-token",
-        help='AWS WAF token value or the method to obtain it. Values: "playwright", "awswaf" or a token string, e.g. an aws-waf-token cookie captured from a browser session.',
-        default="playwright",
+        help=(
+            "AWS WAF token string or the method to obtain it. Possible values: "
+            "\"playwright\" (to use playwright to obtain a token, needs the optional extra: pip install 'pytr[playwright]' && playwright install chromium), "
+            '"awswaf" (to use a pure Python implementation to obtain a token, no browser), '
+            '"default" (let pytr determine what to do, e.g. by login method used.), '
+            "or a token string, e.g. captured from a browser session."
+        ),
+        default="default",
+        dest="waf_token",
+    )
+    waf_group.add_argument(
+        "--no-waf-token",
+        help="Skip the AWS WAF token entirely.",
+        action="store_const",
+        const=None,
+        dest="waf_token",
     )
     parser_login_args.add_argument(
         "--store_credentials",
         help="Store credentials (Phone number, pin, cookies) for next usage",
+        action="store_true",
+        default=False,
+    )
+    parser_login_args.add_argument(
+        "--v2",
+        help=(
+            "Use the v2 web-login flow: confirm in the Trade Republic mobile app "
+            "instead of entering an SMS/notification code. Also supports authenticator-app accounts."
+        ),
         action="store_true",
         default=False,
     )
@@ -344,6 +400,19 @@ def get_main_parser():
         help="Do not sort documents into folders and keep their original filenames",
         action="store_true",
     )
+    parser_dl_docs.add_argument(
+        "--load-event-database",
+        help="Debug/analysis option: load events from this all_events.json instead of fetching from TR. Implies --dry-run; document URLs in the database may be expired.",
+        metavar="PATH",
+        default=None,
+        type=Path,
+    )
+    parser_dl_docs.add_argument(
+        "--dry-run",
+        default=False,
+        help="Create folder structure and empty placeholder files without downloading",
+        action="store_true",
+    )
 
     # export_transactions
     info = (
@@ -393,6 +462,13 @@ def get_main_parser():
         default=False,
         help="Dump more raw data in json format",
         action=argparse.BooleanOptionalAction,
+    )
+    parser_export_transactions.add_argument(
+        "--load-event-database",
+        help="Load events from this all_events.json file instead of fetching from TR (implies no login)",
+        metavar="PATH",
+        type=Path,
+        default=None,
     )
     parser_export_transactions.add_argument(
         "--export-format",
@@ -534,9 +610,10 @@ def get_main_parser():
         action="store_true",
         default=False,
         help=(
-            "Only fetch events after the last run. "
-            "Scans -D/--dir for existing timestamped subfolders and uses the most recent one as the start time. "
-            "Requires -D/--dir. If no previous run is found, all events are fetched."
+            "Only export events not exported by an earlier run. "
+            "Scans -D/--dir for completed timestamped run folders, re-fetches from 7 days before the most recent one "
+            "and skips events whose id is already in an earlier run's events.json. "
+            "Requires -D/--dir. If no completed run is found, all events are fetched."
         ),
     )
 
@@ -635,6 +712,7 @@ def main():
             pin=args.pin,
             store_credentials=args.store_credentials,
             waf_token=args.waf_token,
+            v2=args.v2,
         )
     elif args.command == "portfolio":
         Portfolio(
@@ -643,6 +721,7 @@ def main():
                 pin=args.pin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
+                v2=args.v2,
             ),
             args.include_watchlist,
             instruments_to_ignore=re.split(r"[,;]", args.ignore) if args.ignore else [],
@@ -663,6 +742,7 @@ def main():
                 pin=args.pin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
+                v2=args.v2,
             ),
             isins,
             output=args.output,
@@ -678,16 +758,20 @@ def main():
                 pin=args.pin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
+                v2=args.v2,
             ),
             args.isin,
         ).get()
     elif args.command == "dl_docs":
         DL(
-            login(
+            None
+            if args.load_event_database is not None
+            else login(
                 phone_no=args.phone_no,
                 pin=args.pin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
+                v2=args.v2,
             ),
             args.output,
             args.format,
@@ -705,6 +789,8 @@ def main():
             sort_export=args.sort,
             format_export=args.export_format,
             flat=args.flat,
+            load_event_database=args.load_event_database,
+            dry_run=args.dry_run,
         ).do_dl()
     elif args.command == "export_transactions":
         if args.outputfile is None and args.outputdir is None:
@@ -712,11 +798,14 @@ def main():
             return -1
 
         tl = Timeline(
-            login(
+            None
+            if not_before == -1 or args.load_event_database is not None
+            else login(
                 phone_no=args.phone_no,
                 pin=args.pin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
+                v2=args.v2,
             ),
             args.outputdir,
             not_before,
@@ -724,6 +813,7 @@ def main():
             args.store_event_database,
             args.scan_for_duplicates,
             args.dump_raw_data,
+            load_event_database=args.load_event_database,
         )
         asyncio.run(tl.tl_loop())
         events = tl.events
@@ -775,14 +865,19 @@ def main():
             print(e)
             return -1
     elif args.command == "export_pp":
+        exported_ids: set[str] = set()
         if args.incremental:
             if not args.dir:
                 print("--incremental requires -D/--dir to be set.")
                 return -1
             last_ts = _find_last_run_timestamp(args.dir)
             if last_ts:
-                not_before = last_ts.astimezone().timestamp()
-                log.info(f"Incremental mode: fetching events after {last_ts:%Y-%m-%d %H:%M:%S}")
+                exported_ids = _exported_event_ids(args.dir)
+                not_before = (last_ts - INCREMENTAL_OVERLAP).astimezone().timestamp()
+                log.info(
+                    f"Incremental mode: last completed run {last_ts:%Y-%m-%d %H:%M:%S}; fetching events after "
+                    f"{last_ts - INCREMENTAL_OVERLAP:%Y-%m-%d %H:%M:%S}, skipping {len(exported_ids)} already exported"
+                )
             else:
                 log.info(f"Incremental mode: no previous run found in '{args.dir}', fetching all events")
 
@@ -806,6 +901,7 @@ def main():
             pin=args.pin,
             store_credentials=args.store_credentials,
             waf_token=args.waf_token,
+            v2=args.v2,
         )
 
         output_path = args.dir if args.dir else Path(".")
@@ -816,7 +912,15 @@ def main():
         # --incremental mode.
         tl = Timeline(tr, output_path, not_before, not_after, store_event_database=False)
         asyncio.run(tl.tl_loop())
-        events = tl.events
+        events = [e for e in tl.events if e.get("id") not in exported_ids]
+        if len(events) != len(tl.events):
+            log.info(f"Incremental mode: dropped {len(tl.events) - len(events)} events exported by earlier runs")
+
+        # Write raw events first: if anything below fails, the data is still there to inspect
+        # (e.g. with check_mappings) without fetching everything from TR again.
+        if args.events_file:
+            with open(args.events_file, "w", encoding="utf-8") as fh:
+                json.dump(events, fh, indent=2)
 
         if args.docs_dir:
             docs_dir = Path(args.docs_dir) / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -825,10 +929,10 @@ def main():
             dl = PPDownloader(headers=tr._default_headers_web, max_workers=args.workers)
             files = []
             for event in events:
-                if "details" in event:
-                    for section in event["details"]["sections"]:
-                        if section["type"] == "documents":
-                            for doc in section["data"]:
+                if isinstance(event.get("details"), dict):
+                    for section in event["details"].get("sections") or []:
+                        if section.get("type") == "documents":
+                            for doc in section.get("data") or []:
                                 try:
                                     dt = datetime.strptime(doc["detail"], "%d.%m.%Y")
                                 except (ValueError, KeyError, TypeError):
@@ -841,7 +945,8 @@ def main():
                                     ext = ext[ext.rindex(".") + 1 :].lower()
                                 except ValueError:
                                     ext = "pdf"
-                                event_type = event["eventType"]
+                                    # Events without eventType still get a folder instead of aborting the download
+                                    event_type = event.get("eventType") or "Unknown"
                                 eid = "" if event_type.upper() == "TAX_YEAR_END_REPORT" else f" - {doc['id']}"
                                 rel_path = (
                                     Path(string.capwords(event_type, "_"))
@@ -872,30 +977,8 @@ def main():
                 log.info(f"Skipped {skipped} files (already present).")
 
         if args.payments_file or args.orders_file:
-            Converter().convert(events, args.payments_file, args.orders_file)
-
-            # Event audit
-            def _count_csv_rows(path):
-                if path is None or not Path(path).exists():
-                    return 0
-                with open(path, encoding="utf-8") as fh:
-                    return max(0, sum(1 for _ in fh) - 1)
-
-            orders_count = _count_csv_rows(args.orders_file)
-            payments_count = _count_csv_rows(args.payments_file)
-            converted = orders_count + payments_count
-            total = len(events)
-            log.info("Event audit:")
-            log.info(f"  Raw events fetched from TR : {total}")
-            log.info(f"  Converted to orders.csv   : {orders_count}")
-            log.info(f"  Converted to payments.csv : {payments_count}")
-            if total > converted:
-                log.info(f"  Ignored / skipped         : {total - converted}  (account events, expired orders, etc.)")
-            print_gap_report(events)
-
-        if args.events_file:
-            with open(args.events_file, "w") as fh:
-                json.dump(events, fh, indent=2)
+            report = Converter().convert(events, args.payments_file, args.orders_file)
+            print_gap_report(events, report)
 
     elif args.command == "check_mappings":
         with open(args.events_file, encoding="utf-8") as fh:
@@ -909,6 +992,7 @@ def main():
                 pin=args.pin,
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
+                v2=args.v2,
             ),
             args.outputfile,
             decimal_localization=args.decimal_localization,

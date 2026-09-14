@@ -1,0 +1,84 @@
+{
+  "id": "00000000-0000-4000-8000-000000000001",
+  "timestamp": "2022-11-10T20:23:59.982+0000",
+  "title": "Hypoport",
+  "icon": "logos/DE0005493365/v2",
+  "subtitle": "Wertpapiertransfer",
+  "action": {
+    "type": "timelineDetail",
+    "payload": "00000000-0000-4000-8000-000000000001"
+  },
+  "trailing": null,
+  "eventType": "ACCOUNT_TRANSFER_INCOMING",
+  "hidden": false,
+  "deleted": false,
+  "source": "timelineActivity",
+  "details": {
+    "id": "00000000-0000-4000-8000-000000000001",
+    "sections": [
+      {
+        "title": "Du hast 3 Aktien erhalten",
+        "data": {
+          "icon": "logos/DE0005493365/v2",
+          "subtitleText": null,
+          "timestamp": "2022-11-10T20:23:59.982+0000",
+          "status": "executed"
+        },
+        "action": {
+          "type": "instrumentDetail",
+          "payload": "DE0005493365"
+        },
+        "type": "header"
+      },
+      {
+        "title": "Übersicht",
+        "data": [
+          {
+            "title": "Status",
+            "detail": {
+              "text": "Completed",
+              "functionalStyle": "EXECUTED",
+              "type": "status"
+            },
+            "style": "plain"
+          },
+          {
+            "title": "Orderart",
+            "detail": {
+              "text": "Wertpapiertransfer",
+              "trend": null,
+              "action": null,
+              "displayValue": null,
+              "type": "text"
+            },
+            "style": "plain"
+          },
+          {
+            "title": "Anteile",
+            "detail": {
+              "text": "3",
+              "trend": null,
+              "action": null,
+              "displayValue": null,
+              "type": "text"
+            },
+            "style": "plain"
+          },
+          {
+            "title": "Anteil",
+            "detail": {
+              "text": "Hypoport",
+              "trend": null,
+              "action": null,
+              "displayValue": null,
+              "type": "text"
+            },
+            "style": "plain"
+          }
+        ],
+        "action": null,
+        "type": "table"
+      }
+    ]
+  }
+}

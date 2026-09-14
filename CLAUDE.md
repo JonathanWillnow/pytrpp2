@@ -26,9 +26,9 @@ pytrpp2 is an **independent fork**. All PP-specific functionality lives exclusiv
 | File | Origin | Purpose |
 |---|---|---|
 | `pytr/api.py`, `timeline.py`, `dl.py`, etc. | upstream pytr | Core TR API — do not modify unless necessary |
-| `pytr/conv_pp.py` | ported from pytrpp | TR event → Portfolio Performance CSV conversion |
+| `pytr/conv_pp.py` | pytrpp2 | Adapter: upstream `Event.from_dict` + `TransactionExporter` → PP `orders.csv` / `payments.csv`, with a `ConversionReport` (converted / ignored / unknown / errors). `FORK_RULES` override upstream for events it mishandles (fixtures in `tests/pp_events/`); remove a rule once upstream handles the event |
 | `pytr/trdl_pp.py` | ported from pytrpp | `get_timestamp`, `Downloader` |
-| `pytr/check_mappings_pp.py` | new | Audit events for unmapped TR event types |
+| `pytr/check_mappings_pp.py` | new | Event audit + gap report built on `ConversionReport` |
 | `pytr/main.py` | upstream + additions | Added `export_pp`, `check_mappings` subcommands |
 
 PP-specific additions use the `_pp` filename suffix.
@@ -41,7 +41,8 @@ Every new feature and every bug fix requires a test in `tests/`.
 
 | Change type | Test file |
 |---|---|
-| PP conversion (new event type, parsing) | `test_conv_pp.py` |
+| New TR event type or parsing bug | fix upstream-style in `pytr/event.py` + fixture in `tests/events/` + case in `test_events.py` (ideally contributed upstream) |
+| PP row mapping (orders/payments) | `test_conv_pp.py` |
 | `export_pp` CLI argument or behaviour | `test_trdl_pp.py` |
 | `Downloader`, `get_timestamp`, utilities | `test_trdl_pp.py` |
 | Mapping gap checker | `test_check_mappings_pp.py` |

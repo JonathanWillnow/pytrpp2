@@ -1,908 +1,409 @@
 """
-conv_pp.py — Ported from pytrpp's conv.py.
+conv_pp.py — Portfolio Performance CSV export for Trade Republic events.
 
-Converts raw TR timeline events into typed Python objects and exports them
-to Portfolio Performance-compatible CSV files (payments.csv, orders.csv).
+Classification and parsing of TR events is delegated to upstream pytr
+(pytr.event.Event and pytr.transactions.TransactionExporter). Upstream tests that code
+against real TR payloads and keeps it current with TR API changes, so pytrpp2 gets those
+fixes with every upstream merge. This module only maps upstream's transactions onto the
+two Portfolio Performance CSV imports:
+
+- orders.csv   — portfolio transactions: Kauf, Verkauf, Einlieferung, Auslieferung
+- payments.csv — account transactions: Einlage, Entnahme, Dividende, Zinsen, Steuern, ...
+
+Every event ends up in exactly one bucket of the ConversionReport — converted, ignored
+(known non-financial), unknown (upstream could not classify it) or error (parsing failed) —
+so no event is dropped silently.
 """
 
-import json
+import csv
+import logging
 import re
-from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
-from typing import Any, Callable
+from typing import Callable
 
-from pytr.trdl_pp import get_timestamp
+from pytr.event import Event, get_event_logger
+from pytr.transactions import TransactionExporter
 
-RE_ISIN = re.compile(r"^[A-Z]{2}-?[\dA-Z]{9}-?\d$")
+ORDERS_HEADER = [
+    "Wert",
+    "Buchungswährung",
+    "Datum",
+    "Uhrzeit",
+    "Typ",
+    "Notiz",
+    "Gebühren",
+    "Steuern",
+    "ISIN",
+    "Wertpapiername",
+    "Stück",
+]
+PAYMENTS_HEADER = [
+    "Wert",
+    "Buchungswährung",
+    "Datum",
+    "Uhrzeit",
+    "Typ",
+    "Notiz",
+    "Steuern",
+    "ISIN",
+    "Wertpapiername",
+    "Stück",
+]
 
+# German labels produced by TransactionExporter(lang="de") for account transactions.
+PAYMENT_TYPES = {
+    "Einlage",
+    "Entnahme",
+    "Dividende",
+    "Zinsen",
+    "Zinsbelastung",
+    "Steuern",
+    "Steuerrückerstattung",
+    "Gebühren",
+    "Gebührenerstattung",
+}
 
-class Amount:
-    def __init__(self, value: str | Decimal, currency: str, fraction_digits: int | None = None) -> None:
-        self.value = Decimal(value)
-        if fraction_digits is not None:
-            self.value = self.value.quantize(Decimal("1." + "0" * int(fraction_digits)))
-        self.currency = currency
-
-    def __format__(self, format_spec: str):
-        if format_spec == ",":
-            return str(self.value).replace(".", ",")
-        elif format_spec == ".":
-            return str(self.value)
-        else:
-            return format(self.value, format_spec)
-
-    def __repr__(self):
-        return f"{repr(self.value)} {self.currency}"
-
-    @classmethod
-    def zero(cls, currency="EUR"):
-        return cls(Decimal("0.00"), currency)
-
-    @classmethod
-    def from_text(cls, text: str):
-        CURRENCIES = "€$"
-        WHITESPACE = "  \t"
-        if text == "Gratis":
-            return cls.zero()
-
-        # Remove currency
-        if text[0] in CURRENCIES:
-            currency = text[0]
-            text = text[1:]
-        elif text[-1] in CURRENCIES:
-            currency = text[-1]
-            text = text[:-1]
-
-        if text[0] in "+-":
-            text = text[1:]
-
-        text = text.strip(WHITESPACE)
-
-        # Adapted from code by savek-cc (https://github.com/MartinScharrer/pytrpp/issues/2):
-        if "." in text and "," in text:
-            # Remove any dots (the thousand separators)
-            text = text.replace(".", "")
-            # Replace the comma (decimal separator) with a dot.
-            text = text.replace(",", ".")
-        # If only a comma exists, assume it is the decimal separator.
-        elif "," in text:
-            text = text.replace(",", ".")
-        # If only a dot exists or no separator exists, assume it's in the correct format.
-        currency = {"€": "EUR", "$": "USD"}.get(currency, ascii(currency))
-        return Amount(text, currency)
+_UNKNOWN_EVENT_LOG_PREFIX = "Ignoring unknown event"
 
 
-def amount(event: dict) -> "Amount | None":
-    """Extract amount from event."""
-    try:
-        amount_dict = event["amount"]
-        return Amount(amount_dict["value"], amount_dict["currency"], amount_dict["fractionDigits"])
-    except KeyError:
-        return None
+@dataclass
+class PPRow:
+    """One line in orders.csv (kind='order') or payments.csv (kind='payment')."""
 
-
-# ---------------------------------------------------------------------------
-# Helpers for new-style TR data format (post-early-2025)
-# ---------------------------------------------------------------------------
-# TR changed section detail values from plain strings to dicts:
-#   old: {"title": "X", "detail": "value"}
-#   new: {"title": "X", "detail": {"text": "value", "type": "text", ...}}
-# These helpers read both formats transparently.
-
-
-def _detail_text(detail) -> str:
-    """Return the display text from a section detail, handling both old (str) and new (dict) format."""
-    if isinstance(detail, dict):
-        return detail.get("text", "")
-    return str(detail) if detail is not None else ""
-
-
-def _get_section_new(event: dict, *section_titles: str) -> dict:
-    """Return {title: text} for the first matching section, using _detail_text for both detail formats."""
-    try:
-        for section in event["details"]["sections"]:
-            if section.get("title") in section_titles:
-                result = {}
-                for item in section.get("data", []):
-                    if isinstance(item, dict) and item.get("title"):
-                        result[item["title"]] = _detail_text(item.get("detail"))
-                return result
-    except (KeyError, TypeError):
-        pass
-    return {}
-
-
-_RE_TRANSACTION = re.compile(
-    r"(\d[\d.,]*)\s*[×x\*]\s*([\d.,]+[\xa0\s]*[€$])",
-    re.UNICODE,
-)
-
-
-def _parse_transaction_text(text: str):
-    """Parse a transaction summary like '3 × 328,70 €' or '0.685102 × 160,56 €'.
-
-    Returns (shares: Decimal, price_text: str) or (None, None) if unparseable.
-
-    Distinguishes thousands-separator dots (e.g. '1.000') from decimal-point dots
-    (e.g. '0.685102') by checking whether the dot is followed by exactly three digits.
-    """
-    m = _RE_TRANSACTION.search(text)
-    if not m:
-        return None, None
-    shares_str = m.group(1)
-    price_str = m.group(2).strip()
-
-    if re.search(r"\.\d{3}(?!\d)", shares_str) and not re.search(r"\.\d{1,2}$", shares_str):
-        # Thousands separators: strip dots, then replace comma decimal separator
-        shares_str = shares_str.replace(".", "").replace(",", ".")
-    else:
-        # Decimal point notation or plain integer: only replace comma → dot
-        shares_str = shares_str.replace(",", ".")
-
-    try:
-        shares = Decimal(shares_str)
-    except InvalidOperation:
-        return None, None
-    return shares, price_str
-
-
-class Event:
-    pass
-
-
-class TransactionEvent(Event):
-    def get_isin(self, event: dict):
-        try:
-            sections = event["details"]["sections"]
-            for section in sections:
-                action = section.get("action")
-                if action:
-                    if action["type"] == "instrumentDetail":
-                        return action["payload"]
-        except KeyError:
-            pass
-        # Otherwise try to extract it from the icon
-        try:
-            icon = event["icon"].split("/", 3)[1]
-            if RE_ISIN.match(icon):
-                return icon
-        except (TypeError, ValueError):
-            pass
-        return ""
-
-    def get_transaction(self, event: dict):
-        transaction = {}
-        try:
-            sections = event["details"]["sections"]
-            for section in sections:
-                if section.get("title") in ("Transaktion", "Geschäft"):
-                    for data in section["data"]:
-                        title = data["title"]
-                        text = data["detail"]["text"]
-                        if title == "Aktion":
-                            text = Decimal(text)
-                        elif title in ("Gebühr", "Steuern"):
-                            if text.lower() == "kostenlos":
-                                text = Amount.zero()
-                            else:
-                                text = Amount.from_text(text)
-                        elif title in ("Aktienkurs", "Anteilspreis"):
-                            title = "Preis"
-                            text = Amount.from_text(text)
-                        elif title in ("Gesamt", "Tilgung", "Coupon Zahlung"):
-                            text = Amount.from_text(text)
-                        elif title in ("Anteile", "Aktien"):
-                            title = "Anteile"
-                            text = Decimal(text.replace(",", "."))
-                        elif title == "Dividende pro Aktie":
-                            title = "Dividende je Aktie"
-                        transaction[title] = text
-        except KeyError:
-            pass
-        return transaction
-
-    def get_section(self, event: dict, *section_titles: str) -> dict | None:
-        try:
-            sections = event["details"]["sections"]
-            for section in sections:
-                if section.get("title") in section_titles:
-                    return {data["title"]: data["detail"]["text"] for data in section["data"]}
-        except KeyError:
-            return None
-        return None
-
-
-class Unknown(Event):
-    def __init__(self, event: dict):
-        self.event = deepcopy(event)
-
-    def __repr__(self):
-        return f"Unknown({self.event['eventType']})"
-
-
-class Ignore(Event):
-    def __init__(self, event: dict):
-        self.event = deepcopy(event)
-
-    def __repr__(self):
-        return f"Ignore({self.event['eventType']})"
-
-
-class Investment(TransactionEvent):
-    note: str
+    kind: str
     type: str
-
-    TYPES = {
-        "Round up": "Kauf",
-        "Sparplan": "Kauf",
-        "Saveback": "Einlieferung",
-        "Wertpapiertransfer": "Einlieferung",
-        "Kauf": "Kauf",
-        "Verkauf": "Verkauf",
-    }
-
-    def __init__(self, event: dict):
-        self.dt: datetime = get_timestamp(event["timestamp"])
-        self.value: Amount | None = amount(event)  # type: ignore[assignment]
-        if event.get("title", "").startswith("Anleihe"):
-            self.note = "Anleihe"
-        self.isin: str = self.get_isin(event)
-        transaction = self.get_transaction(event)
-        self.price = transaction.get("Preis")
-        self.taxes = transaction.get("Steuern", Amount.zero())
-        self.costs = transaction.get("Gebühr", Amount.zero())
-        if self.value is None:
-            self.value = transaction.get("Gesamt", Amount.zero())
-        overview = self.get_section(event, "Übersicht") or {}
-        for t in ("Asset", "Anteil"):
-            self.name = overview.get(t)
-            if self.name is not None:
-                break
-        try:
-            self.type
-        except AttributeError:
-            ty: str | None = None
-            for t in ("Ordertyp", "Orderart", "Auftragsart"):
-                ty = overview.get(t)
-                if ty is not None:
-                    break
-            self.type = self.TYPES.get(ty, ty) if ty is not None else "Kauf"
-        self.shares = transaction.get("Anteile")
-        if self.shares is None:
-            self.shares = 1
-
-    @staticmethod
-    def csv_header(sep=";"):
-        return f"Wert{sep}Buchungswährung{sep}Datum{sep}Uhrzeit{sep}Typ{sep}Notiz{sep}Gebühren{sep}Steuern{sep}ISIN{sep}Wertpapiername{sep}Stück\n"
-
-    def csv(self, sep=";", decimal=","):
-        dt = self.dt.astimezone()
-        return (
-            f"{self.value:{decimal}}{sep}{self.value.currency}{sep}{dt:%d.%m.%Y}{sep}"
-            f"{dt:%H:%M:%S}{sep}{self.type}{sep}{self.note}{sep}{self.costs:{decimal}}{sep}{self.taxes:{decimal}}{sep}"
-            f"{self.isin}{sep}{self.name}{sep}{str(self.shares).replace('.', ',')}\n"
-        )
-
-
-class Payment(Event):
+    value: Decimal
+    currency: str
+    dt: datetime
     note: str
-    type: str
+    isin: str = ""
+    name: str = ""
+    shares: Decimal | None = None
+    fees: Decimal = Decimal("0.00")
+    taxes: Decimal = Decimal("0.00")
+    warning: str = ""  # reported in ConversionReport.warnings
 
-    def __init__(self, event: dict):
-        self.dt: datetime = get_timestamp(event["timestamp"])
-        self.value: Amount | None = amount(event)  # type: ignore[assignment]
-
-    def csv(self, sep=";", decimal=","):
+    def csv_fields(self) -> list[str]:
         dt = self.dt.astimezone()
-        try:
-            taxes = f"{self.taxes:{decimal}}"
-        except AttributeError:
-            taxes = ""
-        return f"{str(self.value.value).replace('.', ',')}{sep}{self.value.currency}{sep}{dt:%d.%m.%Y}{sep}{dt:%H:%M:%S}{sep}{self.type}{sep}{self.note}{sep}{taxes}{sep}{sep}{sep}\n"
-
-    @staticmethod
-    def csv_header(sep=";"):
-        return f"Wert{sep}Buchungswährung{sep}Datum{sep}Uhrzeit{sep}Typ{sep}Notiz{sep}Steuern{sep}ISIN{sep}Wertpapiername{sep}Stück\n"
+        fields = [_fmt(self.value), self.currency, f"{dt:%d.%m.%Y}", f"{dt:%H:%M:%S}", self.type, self.note]
+        if self.kind == "order":
+            fields.append(_fmt(self.fees))
+        fields += [_fmt(self.taxes), self.isin, self.name, _fmt(self.shares)]
+        return fields
 
 
-class RoundUp(Investment):
-    """benefits_spare_change_execution"""
+@dataclass
+class Issue:
+    """An event that was not (fully) converted."""
 
-    note = "Round-up"
-
-
-class AccountTransferIncoming(Investment):
-    note = "Eingehender Wertpapierübertrag"
-    type = "Einlieferung"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        if self.value is None:
-            self.value = Amount.zero()
+    key: str  # eventType, or "<missing>: <subtitle>" for events without eventType
+    event: str  # human-readable identification: date, title, subtitle, id
+    detail: str = ""
 
 
-def securities_transfer_outgoing(event):
-    try:
-        return SecuritiesTransferOutgoing(event)
-    except Exception:
-        return Ignore(event)
+@dataclass
+class ConversionReport:
+    total: int = 0
+    converted: int = 0
+    orders: int = 0
+    payments: int = 0
+    ignored: dict[str, int] = field(default_factory=dict)
+    unknown: list[Issue] = field(default_factory=list)
+    errors: list[Issue] = field(default_factory=list)
+    warnings: list[Issue] = field(default_factory=list)
+
+    @property
+    def gaps(self) -> list[Issue]:
+        """Events that may carry financial data but are missing from the CSVs."""
+        return self.unknown + self.errors
 
 
-class SecuritiesTransferOutgoing(Investment):
-    note = "Ausgehender Wertpapierübertrag"
-    type = "Auslieferung"
-
-    def __init__(self, event: dict):
-        self.dt: datetime = get_timestamp(event["timestamp"])
-        self.isin: str = self.get_isin(event)
-        overview = self.get_section(event, "Übersicht", "Overview") or {}
-        for t in ("Asset", "Anteil"):
-            self.name = overview.get(t)
-            if self.name is not None:
-                break
-        self.shares = overview.get("Aktien")
-        if self.shares is None:
-            self.shares = 1
-        self.costs = Amount.zero()
-        self.taxes = Amount.zero()
-        self.value = Amount.zero()
+def event_key(event: dict) -> str:
+    """Group key for an event in reports: its eventType, or its subtitle/title if eventType is missing."""
+    et = event.get("eventType")
+    if et:
+        return str(et)
+    label = event.get("subtitle") or event.get("title")
+    return f"<missing>: {label}" if label else "<missing>"
 
 
-class SavingsPlanExec(Investment):
-    note = "Sparplan"
+def describe_event(event: dict) -> str:
+    date = str(event.get("timestamp") or "")[:10]
+    return f"{date} {event.get('title') or ''} -- {event.get('subtitle') or ''} (id {event.get('id')})"
 
 
-class SaveBack(Investment):
-    note = "SaveBack"
+def _fmt(value: Decimal | None) -> str:
+    return "" if value is None else format(value, "f").replace(".", ",")
 
 
-class Order(Investment):
-    note = "Wertpapierorder"
+def _money(value) -> Decimal:
+    if value is None:
+        return Decimal("0.00")
+    return abs(Decimal(str(value))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-class StockPerkRefunded(AccountTransferIncoming):
-    note = "Gratisaktie"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.type = "Einlieferung"
-
-
-class CardTransaction(Payment):
-    type = "Entnahme"
-    note = "Kartenzahlung"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.note += f": {event['title']}"
-
-
-class PaymentInbound(Payment):
-    type = "Einlage"
-    note = "Eingehende Überweisung"
-
-
-class PaymentInboundSepaDirectDebit(PaymentInbound):
-    note = "Eingehende Lastschrift"
-
-
-class PaymentOutbound(Payment):
-    type = "Entnahme"
-    note = "Ausgehende Überweisung"
-
-
-def SspCorporateActionInvoiceCash(event: dict) -> Event:
-    if event["subtitle"] == "Vorabpauschale":
-        return Vorabpauschale(event)
-    else:
-        return Dividend(event)
-
-
-class Vorabpauschale(Payment, TransactionEvent):
-    note = "Vorabpauschale"
-    type = "Steuern"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.isin: str = self.get_isin(event)
-        transaction = self.get_transaction(event)
-        self.taxes = transaction.get("Steuern", Amount.zero())
-        self.name = event["title"]
-
-    def csv(self, sep=";"):
-        s = super().csv(sep).rstrip(f"\n{sep}")
-        return f'{s}{sep}{self.isin}{sep}"{self.name}"{sep}\n'
-
-
-class Dividend(Payment, TransactionEvent):
-    """Dividend payout"""
-
-    type = "Dividende"
-    note = "Dividende"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.isin: str = self.get_isin(event)
-        transaction = self.get_transaction(event)
-        self.shares = transaction.get("Anteile")
-        self.dividend_per_share = transaction.get("Dividende je Aktie")
-        self.taxes = transaction.get("Steuern", Amount.zero())
-        self.name = event["title"]
-
-    def csv(self, sep=";"):
-        s = super().csv(sep).rstrip(f"\n{sep}")
-        return f'{s}{sep}{self.isin}{sep}"{self.name}"{sep}{str(self.shares).replace(".", ",")}\n'
-
-
-class CouponPayment(Payment, TransactionEvent):
-    type = "Dividende"
-    note = "Coupon Zahlung"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.isin: str = self.get_isin(event)
-        transaction = self.get_transaction(event)
-        self.shares = 1
-        self.value = transaction["Coupon Zahlung"]
-        self.taxes = transaction.get("Steuern", Amount.zero())
-        self.name = f"{event['title']}: Coupon {transaction['Coupon']}"
-
-    def csv(self, sep=";"):
-        s = super().csv(sep).rstrip(f"\n{sep}")
-        return f'{s}{sep}{self.taxes}{sep}{self.isin}{sep}"{self.name}"{sep}{self.shares}\n'
-
-
-class InterestPayout(Payment, TransactionEvent):
-    type = "Zinsen"
-    note = "Zinsen"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        transaction = self.get_transaction(event)
-        self.taxes = transaction.get("Steuern", Amount.zero())
-
-
-class TaxRefund(Payment):
-    type = "Steuerrückerstattung"
-    note = "Steuerrückerstattung"
-
-
-class CardRefund(CardTransaction):
-    type = "Einlage"
-    note = "Kartenrückzahlung"
-
-
-class CardOriginalCreditTransaction(CardTransaction):
-    type = "Einlage"
-    note = "Kartenrückzahlung"
-
-
-class CardWithdrawal(CardTransaction):
-    type = "Entnahme"
-    note = "Geldautomat"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.note += f" {event['subtitle']}"
-
-
-class CardOrderBilled(Payment):
-    type = "Gebühren"
-    note = "Kartengebühr"
-
-
-class BondRepayment(Investment):
-    note = "Anleihe"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.type = "Verkauf"
+def _shares(value) -> Decimal | None:
+    if value is None:
+        return None
+    return abs(Decimal(str(value))).normalize()
 
 
 # ---------------------------------------------------------------------------
-# New-style event handlers (post-early-2025 TR data format)
+# pytrpp2 rules for events upstream pytr does not handle (yet)
 # ---------------------------------------------------------------------------
+# Found in real exports. A rule returns the PP rows for an event ([] = nothing to book) and
+# overrides upstream's classification, or None to leave the event to upstream. Propose these
+# upstream; once upstream handles an event correctly, remove its rule here.
+
+_RE_ISIN_IN_ICON = re.compile(r"(?:^|/)([A-Z]{2}[A-Z0-9]{9}\d)(?:/|$)")
 
 
-class NewStyleOrder(Investment):
-    """Handler for TRADING_TRADE_EXECUTED — new TR name and new data layout.
+def _isin(raw: dict, event: Event) -> str:
+    if event.isin:
+        return event.isin
+    m = _RE_ISIN_IN_ICON.search(str(raw.get("icon") or ""))
+    return m.group(1) if m else ""
 
-    Shares and price are encoded as a single 'Transaktion' text in 'Übersicht'
-    (e.g. '3 × 328,70 €') rather than separate rows in a 'Transaktion' section.
+
+def _section_items(raw: dict, *titles: str) -> dict[str, str]:
+    items: dict[str, str] = {}
+    for section in (raw.get("details") or {}).get("sections") or []:
+        if section.get("title") in titles and isinstance(section.get("data"), list):
+            for item in section["data"]:
+                if isinstance(item, dict) and item.get("title"):
+                    detail = item.get("detail")
+                    items[item["title"]] = detail.get("text", "") if isinstance(detail, dict) else str(detail or "")
+    return items
+
+
+def _share_count(text: str) -> Decimal:
+    shares = _shares(Event._parse_float_from_text_value(text, pref_locale="en"))
+    if not shares:
+        raise ValueError(f"cannot parse share count {text!r}")
+    return shares
+
+
+def _delivery(typ: str, raw: dict, event: Event, shares: Decimal) -> PPRow:
+    title = event.title or ""
+    return PPRow(
+        kind="order",
+        type=typ,
+        value=Decimal("0.00"),
+        currency="EUR",
+        dt=event.date,
+        note=f"{raw.get('subtitle')} - {title}" if raw.get("subtitle") else title,
+        isin=_isin(raw, event),
+        name=title,
+        shares=shares,
+    )
+
+
+def _securities_account_transfer(raw: dict, event: Event) -> list[PPRow] | None:
+    """ACCOUNT_TRANSFER_INCOMING/OUTGOING of shares, e.g. "Du hast 3 Aktien erhalten".
+
+    Upstream maps ACCOUNT_TRANSFER_INCOMING to a cash deposit, which books 0 € and loses the
+    shares. Transfers that carry an amount are cash and stay with upstream.
     """
-
-    note = "Wertpapierorder"
-
-    def __init__(self, event: dict):
-        self.dt = get_timestamp(event["timestamp"])
-        self.isin = self.get_isin(event)
-        overview = _get_section_new(event, "Übersicht")
-        self.name = overview.get("Asset") or event.get("title", "")
-        subtitle = event.get("subtitle", "").lower()
-        if "sell" in subtitle or "verkauf" in subtitle or "verk" in subtitle:
-            self.type = "Verkauf"
-        else:
-            self.type = "Kauf"
-        fee_text = overview.get("Gebühr", "")
-        try:
-            self.costs = (
-                Amount.from_text(fee_text)
-                if fee_text and fee_text.lower() not in ("", "kostenlos", "gratis")
-                else Amount.zero()
-            )
-        except Exception:
-            self.costs = Amount.zero()
-        self.taxes = Amount.zero()
-        self.value = amount(event)  # type: ignore[assignment]
-        if self.value is not None:
-            self.value = Amount(abs(self.value.value), self.value.currency)
-        transaction_text = overview.get("Transaktion", "")
-        shares, price_text = _parse_transaction_text(transaction_text)
-        self.shares = shares if shares is not None else Decimal("1")
-        try:
-            self.price = Amount.from_text(price_text) if price_text else None
-        except Exception:
-            self.price = None
-        if self.value is None:
-            self.value = Amount.zero()
+    overview = _section_items(raw, "Übersicht", "Overview")
+    count = overview.get("Anteile") or overview.get("Aktien") or overview.get("Shares")
+    if not count or (raw.get("amount") or {}).get("value"):
+        return None
+    typ = "Einlieferung" if str(raw.get("eventType")).upper().endswith("INCOMING") else "Auslieferung"
+    return [_delivery(typ, raw, event, _share_count(count))]
 
 
-class NewStyleSavingsPlan(NewStyleOrder):
-    """Handler for TRADING_SAVINGSPLAN_EXECUTED."""
+def _sharebooking(raw: dict, event: Event) -> list[PPRow]:
+    """SHAREBOOKING / SHAREBOOKING_CANCELED: shares booked in or out by a corporate action.
 
-    note = "Sparplan"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.type = "Kauf"
-
-
-class NewStyleRoundUp(NewStyleOrder):
-    """Handler for SPARE_CHANGE_AGGREGATE (TR round-up feature)."""
-
-    note = "Round-up"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.type = "Kauf"
-
-
-class NewStyleSaveBack(NewStyleOrder):
-    """Handler for SAVEBACK_AGGREGATE (TR 1% cashback reinvestment).
-
-    Classified as Einlieferung (free delivery) with zero costs.
-    Fix 11: value is kept from the event (not zeroed) so PP can compute the correct Kurs.
+    TR books and cancels these separately (Veralto spin-off 2023: +1, -1, +1), so every event
+    is one delivery. Upstream ignores both, which makes later sales exceed the holdings.
     """
-
-    note = "TR 1% Saveback"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.type = "Einlieferung"
-        self.costs = Amount.zero()
-
-
-class CardPayment(Payment):
-    """Handler for CARD_TRANSACTION and CARD_AFT (card purchases and debit settlements).
-
-    TR sends negative amounts for outgoing card charges; PP expects positive Entnahme values.
-    """
-
-    type = "Entnahme"
-    note = "Konsum"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.note = f"Konsum - {event.get('title', '')}"
-        if self.value is not None:
-            self.value = Amount(abs(self.value.value), self.value.currency)
+    txn = _section_items(raw, "Transaktion", "Transaction")
+    booked_in = txn.get("Gutgeschriebene Anteile") or txn.get("Eingebuchte Anteile")
+    booked_out = txn.get("Ausgebuchte Anteile")
+    if booked_in:
+        return [_delivery("Einlieferung", raw, event, _share_count(booked_in))]
+    if booked_out:
+        return [_delivery("Auslieferung", raw, event, _share_count(booked_out))]
+    raise ValueError("share booking without share count")
 
 
-def card_payment_or_ignore(event: dict) -> Event:
-    """Factory for CARD_TRANSACTION and CARD_AFT.
-
-    Rejected and cancelled transactions carry no actual money movement and must
-    not appear in payments.csv.  Only the subtitle distinguishes them from real
-    charges at the event-type level.
-    """
-    if (event.get("subtitle") or "") in ("Abgelehnt", "Abgebrochen"):
-        return Ignore(event)
-    return CardPayment(event)
+def _nothing_to_book(raw: dict, event: Event) -> list[PPRow]:
+    return []
 
 
-class NewStyleCardRefund(Payment):
-    """Handler for CARD_REFUND (money returned after a card transaction).
-
-    Named NewStyleCardRefund to avoid collision with the existing CardRefund class
-    which handles the old-format 'card_refund' event type.
-    """
-
-    type = "Einlage"
-    note = "Konsum"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.note = f"Konsum - {event.get('title', '')}"
-        if self.value is not None:
-            self.value = Amount(abs(self.value.value), self.value.currency)
+FORK_RULES: dict[str, Callable[[dict, Event], list[PPRow] | None]] = {
+    "ACCOUNT_TRANSFER_INCOMING": _securities_account_transfer,
+    "ACCOUNT_TRANSFER_OUTGOING": _securities_account_transfer,
+    "SHAREBOOKING": _sharebooking,
+    "SHAREBOOKING_CANCELED": _sharebooking,
+    "EXEMPTION_ORDER_CREATED": _nothing_to_book,  # Freistellungsauftrag created
+}
 
 
-class NewStyleDividend(Payment, TransactionEvent):
-    """Handler for SSP_CORPORATE_ACTION_CASH (new name for dividend events).
+class _WarningCapture(logging.Handler):
+    def __init__(self):
+        super().__init__(logging.WARNING)
+        self.messages: list[str] = []
 
-    Uses _get_section_new so it handles both old-style string and new-style dict
-    detail values. Handles None shares safely in csv() output.
-    """
-
-    type = "Dividende"
-    note = "Dividende"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.isin = self.get_isin(event)
-        self.name = event.get("title", "")
-        section = _get_section_new(event, "Geschäft", "Transaktion")
-        shares_str = section.get("Aktien", section.get("Anteile", ""))
-        try:
-            self.shares = Decimal(shares_str.replace(",", ".")) if shares_str else None
-        except InvalidOperation:
-            self.shares = None
-        taxes_text = section.get("Steuern", "")
-        try:
-            self.taxes = Amount.from_text(taxes_text) if taxes_text else Amount.zero()
-        except Exception:
-            self.taxes = Amount.zero()
-
-    def csv(self, sep=";"):
-        s = Payment.csv(self, sep).rstrip(f"\n{sep}")
-        shares_str = str(self.shares).replace(".", ",") if self.shares is not None else ""
-        return f'{s}{sep}{self.isin}{sep}"{self.name}"{sep}{shares_str}\n'
-
-
-class NewStyleCouponPayment(Payment, TransactionEvent):
-    """Handler for COUPON_PAYMENT with new data format.
-
-    Replaces CouponPayment which crashes on new-format section data.
-    Uses _get_section_new for robust section reading.
-    """
-
-    type = "Dividende"
-    note = "Coupon Zahlung"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.isin = self.get_isin(event)
-        self.name = event.get("title", "")
-        section = _get_section_new(event, "Transaktion", "Geschäft", "Übersicht")
-        taxes_text = section.get("Steuern", "")
-        try:
-            self.taxes = Amount.from_text(taxes_text) if taxes_text else Amount.zero()
-        except Exception:
-            self.taxes = Amount.zero()
-        self.shares = Decimal("1")
-
-    def csv(self, sep=";"):
-        s = Payment.csv(self, sep).rstrip(f"\n{sep}")
-        shares_str = str(self.shares).replace(".", ",") if self.shares is not None else ""
-        return f'{s}{sep}{self.isin}{sep}"{self.name}"{sep}{shares_str}\n'
-
-
-class NewStyleBondRepayment(NewStyleOrder):
-    """Handler for REPAYMENT (bond maturity) with new data format.
-
-    Replaces BondRepayment which uses the old-style section parser.
-    """
-
-    note = "Anleihe"
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        self.type = "Verkauf"
-        self.note = "Anleihe"
-
-
-class NewStyleSecuritiesTransferOutgoing(Investment):
-    """Handler for ACCOUNT_TRANSFER_OUTGOING and SECURITIES_TRANSFER_OUTGOING.
-
-    Reads share count from Übersicht → Anteile or Aktien using _get_section_new.
-    Value is zero (transfers have no cash consideration).
-    """
-
-    note = "Ausgehender Wertpapierübertrag"
-    type = "Auslieferung"
-
-    def __init__(self, event: dict):
-        self.dt = get_timestamp(event["timestamp"])
-        self.isin = self.get_isin(event)
-        self.name = event.get("title", "")
-        overview = _get_section_new(event, "Übersicht")
-        anteile = overview.get("Anteile") or overview.get("Aktien")
-        if anteile:
-            try:
-                self.shares = Decimal(anteile.replace(",", ".").strip())
-            except InvalidOperation:
-                self.shares = Decimal("1")
-        else:
-            self.shares = Decimal("1")
-        self.costs = Amount.zero()
-        self.taxes = Amount.zero()
-        self.value = Amount.zero()
-        self.price = None
-
-
-class FixedAccountTransferIncoming(AccountTransferIncoming):
-    """Fix for ACCOUNT_TRANSFER_INCOMING: reads actual share count from Übersicht → Anteile.
-
-    The base class falls back to shares=1 because transfer events have no
-    'Transaktion'/'Geschäft' section. This subclass overrides shares with the
-    correct value from the 'Übersicht' section after calling super().__init__().
-    """
-
-    def __init__(self, event: dict):
-        super().__init__(event)
-        overview = _get_section_new(event, "Übersicht")
-        anteile = overview.get("Anteile")
-        if anteile:
-            try:
-                self.shares = Decimal(anteile.replace(",", ".").strip())
-            except InvalidOperation:
-                pass
+    def emit(self, record):
+        self.messages.append(record.getMessage().split("\n", 1)[0])
 
 
 class Converter:
-    event_types: dict[str, Callable[[dict], Any]] = {
-        # --- Old-name orders (historical data, pre-2025) ---
-        "ORDER_EXECUTED": Order,
-        "TRADE_INVOICE": Order,
-        "SAVINGS_PLAN_EXECUTED": SavingsPlanExec,
-        "SAVINGS_PLAN_INVOICE_CREATED": SavingsPlanExec,
-        "trading_savingsplan_executed": SavingsPlanExec,
-        "ACCOUNT_TRANSFER_INCOMING": FixedAccountTransferIncoming,  # fixed: reads shares from Übersicht
-        "SECURITIES_TRANSFER_OUTGOING": NewStyleSecuritiesTransferOutgoing,  # updated: new-format parser
-        "ssp_securities_transfer_outgoing": NewStyleSecuritiesTransferOutgoing,
-        "ORDER_EXPIRED": Ignore,
-        "ORDER_CANCELED": Ignore,
-        "YEAR_END_TAX_REPORT": Ignore,
-        "PRE_DETERMINED_TAX_BASE_EARNING": Ignore,
-        "REFERENCE_ACCOUNT_CHANGED": Ignore,
-        "EX_POST_COST_REPORT": Ignore,
-        "card_successful_verification": Ignore,
-        # --- New-name orders (post-2025 TR renames) ---
-        "TRADING_TRADE_EXECUTED": NewStyleOrder,
-        "trading_trade_executed": NewStyleOrder,  # lowercase variant seen in some TR responses
-        "TRADING_SAVINGSPLAN_EXECUTED": NewStyleSavingsPlan,
-        "SPARE_CHANGE_AGGREGATE": NewStyleRoundUp,
-        "SAVEBACK_AGGREGATE": NewStyleSaveBack,
-        "ACCOUNT_TRANSFER_OUTGOING": NewStyleSecuritiesTransferOutgoing,
-        "TRADING_ORDER_CANCELLED": Ignore,
-        "TRADING_SAVINGSPLAN_EXECUTION_FAILED": Ignore,
-        "ORDER_REJECTED": Ignore,
-        # --- Old-name payments (historical data, pre-2025) ---
-        "PAYMENT_INBOUND": PaymentInbound,
-        "INCOMING_TRANSFER": PaymentInbound,
-        "PAYMENT_INBOUND_SEPA_DIRECT_DEBIT": PaymentInboundSepaDirectDebit,
-        "PAYMENT_OUTBOUND": PaymentOutbound,
-        "OUTGOING_TRANSFER": PaymentOutbound,
-        "INCOMING_TRANSFER_DELEGATION": PaymentInbound,
-        "OUTGOING_TRANSFER_DELEGATION": PaymentOutbound,
-        "CREDIT": Dividend,
-        "ssp_corporate_action_invoice_cash": SspCorporateActionInvoiceCash,
-        "ssp_corporate_action_invoice_shares": Ignore,  # Vorabpauschale without payment
-        "INTEREST_PAYOUT_CREATED": InterestPayout,
-        "INTEREST_PAYOUT": InterestPayout,
-        "card_successful_oct": CardOriginalCreditTransaction,
-        "card_order_billed": CardOrderBilled,
-        "card_refund": CardRefund,
-        "card_successful_atm_withdrawal": CardWithdrawal,
-        "STOCK_PERK_REFUNDED": StockPerkRefunded,
-        "REPAYMENT": NewStyleBondRepayment,  # updated: new-format parser
-        "COUPON_PAYMENT": NewStyleCouponPayment,  # updated: new-format parser
-        # Old-name card
-        "card_successful_transaction": CardTransaction,
-        "card_failed_transaction": Ignore,
-        "card_failed_atm_withdrawal": Ignore,
-        "card_failed_verification": Ignore,
-        # Old-name card-related orders
-        "benefits_spare_change_execution": RoundUp,
-        "benefits_saveback_execution": SaveBack,
-        # --- New-name payments (post-2025 TR renames) ---
-        "BANK_TRANSACTION_INCOMING": PaymentInbound,
-        "BANK_TRANSACTION_OUTGOING": PaymentOutbound,
-        "BANK_TRANSACTION_OUTGOING_SCHEDULED": Ignore,
-        "BANK_TRANSACTION_OUTGOING_DIRECT_DEBIT": PaymentOutbound,
-        "SSP_CORPORATE_ACTION_CASH": NewStyleDividend,
-        "SSP_CORPORATE_ACTION_ACTIVITY": Ignore,
-        "SSP_CORPORATE_ACTION_NO_CASH": Ignore,
-        "SSP_CORPORATE_ACTION_INFORMATIVE": Ignore,
-        "SSP_CORPORATE_ACTION_INSTRUCTION": Ignore,
-        # New-name card
-        "CARD_TRANSACTION": card_payment_or_ignore,
-        "CARD_AFT": card_payment_or_ignore,  # final settlement of a card charge
-        "CARD_VERIFICATION": Ignore,  # pre-auth check, no money movement
-        "CARD_REFUND": NewStyleCardRefund,
-        # --- Account / admin ---
-        "ADDRESS_CHANGED": Ignore,
-        "CASH_ACCOUNT_CHANGED": Ignore,
-        "PUK_CREATED": Ignore,
-        "CUSTOMER_CREATED": Ignore,
-        "SECURITIES_ACCOUNT_CREATED": Ignore,
-        "DOCUMENTS_CREATED": Ignore,
-        "DOCUMENTS_ACCEPTED": Ignore,
-        "DOCUMENTS_CHANGED": Ignore,
-        "DEVICE_RESET": Ignore,
-        "PIN_RESET": Ignore,
-        "EMAIL_VALIDATED": Ignore,
-        "INPAYMENTS_SEPA_MANDATE_CREATED": Ignore,
-        "QUARTERLY_REPORT": Ignore,
-        "GESH_CORPORATE_ACTION": Ignore,
-        "GENERAL_MEETING": Ignore,
-        "SHAREBOOKING": Ignore,
-        "SHAREBOOKING_CANCELED": Ignore,
-        "CRYPTO_TNC_UPDATE_2025": Ignore,
-        "new_tr_iban": Ignore,
-        "ssp_corporate_action_informative_notification": Ignore,
-        "VERIFICATION_TRANSFER_ACCEPTED": Ignore,
-        "MOBILE_CHANGED": Ignore,
-        "STOCK_PERK_EXPIRED": Ignore,
-        "AML_SOURCE_OF_WEALTH_RESPONSE_EXECUTED": Ignore,
-        "MOBILE_RESET": Ignore,
-        # --- Taxes ---
-        "EXEMPTION_ORDER_CHANGED": Ignore,
-        "EXEMPTION_ORDER_CHANGE_REQUESTED": Ignore,
-        "EXEMPTION_ORDER_CHANGE_REQUESTED_AUTOMATICALLY": Ignore,
-        "EXEMPTION_ORDER_CREATED": Ignore,
-        "TAX_REFUND": TaxRefund,
-        "ssp_tax_correction_invoice": TaxRefund,
-        "TAX_YEAR_END_REPORT": Ignore,
-        "TAX_YEAR_END_REPORT_CREATED": Ignore,
-        # --- Reports / other ---
-        "EX_POST_COST_REPORT_CREATED": Ignore,
-        "timeline_legacy_migrated_events": Ignore,
-    }
+    def __init__(self):
+        self._exporter = TransactionExporter(lang="de")
 
-    def convert(self, events: dict, payments_file: None | str | Path, orders_file: None | str | Path):
-        processed = self.process(events)
+    def rows_for_event(self, raw: dict, event: Event) -> list[PPRow]:
+        """Map upstream's transactions for one event onto PP rows.
 
-        if payments_file:
-            with open(payments_file, "w", encoding="utf-8") as fh:
-                fh.write(Payment.csv_header())
-                for p in processed:
-                    if isinstance(p, Payment):
-                        fh.write(p.csv())
+        Raises ValueError for transaction types that have no PP CSV equivalent.
+        """
+        txns = list(self._exporter.from_event(event))
+        currency = (raw.get("amount") or {}).get("currency") or "EUR"
+        title = event.title or ""
 
-        if orders_file:
-            with open(orders_file, "w", encoding="utf-8") as fh:
-                fh.write(Investment.csv_header())
-                for p in processed:
-                    if isinstance(p, Investment):
-                        fh.write(p.csv())
+        def order(typ, t, value=None, isin=None, shares=None, name=None):
+            return PPRow(
+                kind="order",
+                type=typ,
+                value=_money(t["Wert"] if value is None else value),
+                currency=currency,
+                dt=event.date,
+                note=t["Notiz"] or title,
+                isin=(t["ISIN"] if isin is None else isin) or "",
+                name=name or title,
+                shares=_shares(t["Stück"] if shares is None else shares),
+                fees=_money(t["Gebühren"]),
+                taxes=_money(t["Steuern"]),
+            )
 
-    def process(self, events: dict):
-        data = []
-        for event in events:
-            func = self.event_types.get(event["eventType"], Unknown)
-            try:
-                ev = func(event)
-                if isinstance(ev, Unknown):
-                    print(f"Unknown event type {event['eventType']}")
-                if not isinstance(ev, Ignore):
-                    data.append(ev)
-            except (AttributeError, IndexError, KeyError, TypeError):
-                print(f"Error while processing event type {event['eventType']}")
-        return data
+        # Saveback, Aktien-Bonus and the private markets 1 % bonus arrive as a buy plus a
+        # matching deposit. PP models that as a single delivery of the shares.
+        if (
+            len(txns) == 2
+            and [t["Typ"] for t in txns] == ["Kauf", "Einlage"]
+            and _money(txns[0]["Wert"]) == _money(txns[1]["Wert"])
+        ):
+            return [order("Einlieferung", txns[0])]
 
+        rows: list[PPRow] = []
+        for t in txns:
+            typ = t["Typ"]
+            if typ in ("Kauf", "Verkauf"):
+                name = title if not t["ISIN"] or t["ISIN"] == event.isin else (event.note or t["Notiz"])
+                rows.append(order(typ, t, name=name))
+            elif typ == "Umbuchung (Eingang)":
+                rows.append(order("Einlieferung", t, value=0))
+            elif typ == "Umbuchung (Ausgang)":
+                rows.append(order("Auslieferung", t, value=0))
+            elif typ == "Split":
+                # Stück holds the shares added by the split / bonus shares.
+                rows.append(order("Einlieferung", t, value=0))
+            elif typ == "Spinoff":
+                # ISIN is the new security, ISIN2 the parent it was spun off from.
+                rows.append(order("Einlieferung", t, value=0, name=event.note or title))
+            elif typ == "Swap":
+                # ISIN/Stück are removed and ISIN2/Stück2 added. A cash component is booked as
+                # the purchase price of the new shares (negative) or sale proceeds of the old (positive).
+                cash = Decimal(str(t["Wert"] or 0))
+                rows.append(order("Verkauf" if cash > 0 else "Auslieferung", t, value=cash if cash > 0 else 0))
+                rows.append(
+                    order(
+                        "Kauf" if cash < 0 else "Einlieferung",
+                        t,
+                        value=cash if cash < 0 else 0,
+                        isin=t["ISIN2"],
+                        shares=t["Stück2"],
+                        name=event.note or title,
+                    )
+                )
+            elif typ in PAYMENT_TYPES and not (_money(t["Wert"]) or _money(t["Steuern"]) or _money(t["Gebühren"])):
+                continue  # nothing to book, e.g. a Vorabpauschale covered by the tax allowance
+            elif typ in PAYMENT_TYPES:
+                note, warning = t["Notiz"] or title, ""
+                fees = _money(t["Gebühren"])
+                if fees:
+                    # payments.csv has no fee column and TR does not say whether the fee is part of
+                    # the amount, so keep it visible instead of guessing a booking.
+                    note = f"{note} (Gebühren {_fmt(fees)} {currency})"
+                    warning = f"fee of {_fmt(fees)} {currency} is not booked in payments.csv; verify the cash balance"
+                rows.append(
+                    PPRow(
+                        kind="payment",
+                        type=typ,
+                        value=_money(t["Wert"]),
+                        currency=currency,
+                        dt=event.date,
+                        note=note,
+                        isin=t["ISIN"] or "",
+                        name=title if t["ISIN"] else "",
+                        shares=_shares(t["Stück"]),
+                        taxes=_money(t["Steuern"]),
+                        warning=warning,
+                    )
+                )
+            else:
+                raise ValueError(f"no Portfolio Performance mapping for transaction type {typ!r}")
+        return rows
 
-def main():
-    import sys
+    def process(self, events: list[dict]) -> tuple[list[PPRow], ConversionReport]:
+        report = ConversionReport(total=len(events))
+        rows: list[PPRow] = []
+        capture = _WarningCapture()
+        event_logger = get_event_logger()
+        event_logger.addHandler(capture)
+        try:
+            for raw in events:
+                capture.messages.clear()
+                key, desc = event_key(raw), describe_event(raw)
+                # A single malformed event must never abort the whole export.
+                try:
+                    event = Event.from_dict(raw)
+                    rule = FORK_RULES.get(str(raw.get("eventType") or "").upper())
+                    rule_rows = rule(raw, event) if rule is not None else None
+                    if rule_rows is not None:
+                        event_rows = rule_rows
+                        capture.messages.clear()  # the rule overrides upstream's verdict
+                    elif event.event_type is not None:
+                        event_rows = self.rows_for_event(raw, event)
+                    else:
+                        event_rows = []
+                except Exception as e:
+                    report.errors.append(Issue(key, desc, f"{type(e).__name__}: {e}"))
+                    continue
 
-    filename = sys.argv[1]
-    with open(filename, "rt", encoding="utf-8") as fh:
-        events = json.load(fh)
-    basedir = Path(filename).parent
-    Converter().convert(events, basedir / "payments.csv", basedir / "orders.csv")
+                if event_rows:
+                    report.converted += 1
+                    rows.extend(event_rows)
+                    report.warnings.extend(Issue(key, desc, r.warning) for r in event_rows if r.warning)
+                elif any(m.startswith(_UNKNOWN_EVENT_LOG_PREFIX) for m in capture.messages):
+                    report.unknown.append(Issue(key, desc))
+                else:
+                    report.ignored[key] = report.ignored.get(key, 0) + 1
+                for m in capture.messages:
+                    if not m.startswith(_UNKNOWN_EVENT_LOG_PREFIX):
+                        report.warnings.append(Issue(key, desc, m))
+        finally:
+            event_logger.removeHandler(capture)
 
+        rows.sort(key=lambda r: r.dt)
+        report.orders = sum(1 for r in rows if r.kind == "order")
+        report.payments = sum(1 for r in rows if r.kind == "payment")
+        return rows, report
 
-if __name__ == "__main__":
-    main()
+    def convert(
+        self, events: list[dict], payments_file: None | str | Path, orders_file: None | str | Path
+    ) -> ConversionReport:
+        rows, report = self.process(events)
+        for path, kind, header in ((payments_file, "payment", PAYMENTS_HEADER), (orders_file, "order", ORDERS_HEADER)):
+            if not path:
+                continue
+            with open(path, "w", encoding="utf-8", newline="") as fh:
+                writer = csv.writer(fh, delimiter=";", lineterminator="\n")
+                writer.writerow(header)
+                writer.writerows(r.csv_fields() for r in rows if r.kind == kind)
+        return report

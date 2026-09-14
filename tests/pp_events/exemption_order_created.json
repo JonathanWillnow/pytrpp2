@@ -1,0 +1,13 @@
+{
+  "id": "00000000-0000-4000-8000-000000000002",
+  "timestamp": "2019-06-12T12:35:21.971+0000",
+  "title": "Freistellungsauftrag",
+  "icon": "logos/timeline_sale/v2",
+  "subtitle": "Erstellt",
+  "action": null,
+  "trailing": null,
+  "eventType": "EXEMPTION_ORDER_CREATED",
+  "hidden": false,
+  "deleted": false,
+  "source": "timelineActivity"
+}

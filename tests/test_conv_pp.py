@@ -1,683 +1,419 @@
 """
-Tests for pytr.conv_pp — Portfolio Performance conversion layer.
+Tests for pytr.conv_pp — Portfolio Performance CSV export.
 
-Covers:
-- Amount: construction, from_text parsing, formatting
-- Converter.process: event type dispatch, Ignore filtering, Unknown handling
-- Converter.convert: CSV output format and content
+conv_pp delegates event parsing to upstream pytr (pytr.event / pytr.transactions) and maps
+the resulting transactions onto PP's orders.csv / payments.csv. The central test runs every
+real TR fixture in tests/events through export_pp's conversion and checks the rows against
+upstream's hand-verified expectations in test_events.py, translated into PP CSV terms.
 """
 
+import csv
 import json
 from decimal import Decimal
 from pathlib import Path
 
-from pytr.conv_pp import (
-    Amount,
-    Converter,
-    FixedAccountTransferIncoming,
-    InterestPayout,
-    Investment,
-    Payment,
-    PaymentInbound,
-    PaymentOutbound,
-    Unknown,
-    _detail_text,
-    _get_section_new,
-    _parse_transaction_text,
-)
+import pytest
+from test_events import test_data as UPSTREAM_CASES
 
-TESTS_DIR = Path(__file__).parent
+from pytr.conv_pp import ORDERS_HEADER, PAYMENT_TYPES, PAYMENTS_HEADER, Converter
+from pytr.event import get_event_logger
+
+EVENTS_DIR = Path(__file__).parent / "events"
 
 
-def load_fixture(name: str) -> dict:
-    return json.loads((TESTS_DIR / name).read_text(encoding="utf-8"))
+def load_event(name: str) -> dict:
+    return json.loads((EVENTS_DIR / name).read_text(encoding="utf-8"))
 
 
-# ---------------------------------------------------------------------------
-# Amount
-# ---------------------------------------------------------------------------
+def money(value) -> Decimal:
+    return abs(Decimal(str(value or 0))).quantize(Decimal("0.01"))
 
 
-class TestAmount:
-    def test_basic_creation(self):
-        a = Amount("10.50", "EUR")
-        assert a.value == Decimal("10.50")
-        assert a.currency == "EUR"
-
-    def test_fraction_digits_quantizes(self):
-        a = Amount("10.5", "EUR", fraction_digits=2)
-        assert a.value == Decimal("10.50")
-
-    def test_zero_default_currency(self):
-        a = Amount.zero()
-        assert a.value == Decimal("0.00")
-        assert a.currency == "EUR"
-
-    def test_zero_custom_currency(self):
-        a = Amount.zero("USD")
-        assert a.currency == "USD"
-
-    def test_from_text_euro_prefix(self):
-        a = Amount.from_text("€10,50")
-        assert a.value == Decimal("10.50")
-        assert a.currency == "EUR"
-
-    def test_from_text_euro_suffix_with_space(self):
-        a = Amount.from_text("17,77 €")
-        assert a.value == Decimal("17.77")
-        assert a.currency == "EUR"
-
-    def test_from_text_gratis(self):
-        a = Amount.from_text("Gratis")
-        assert a.value == Decimal("0.00")
-        assert a.currency == "EUR"
-
-    def test_from_text_thousands_and_decimal_separator(self):
-        a = Amount.from_text("3.002,80 €")
-        assert a.value == Decimal("3002.80")
-
-    def test_from_text_strips_sign(self):
-        a = Amount.from_text("-1,00 €")
-        assert a.value == Decimal("1.00")
-
-    def test_format_comma_decimal(self):
-        a = Amount("10.50", "EUR")
-        assert f"{a:,}" == "10,50"
-
-    def test_format_dot_decimal(self):
-        a = Amount("10.50", "EUR")
-        assert f"{a:.}" == "10.50"
-
-    def test_repr(self):
-        a = Amount("10.50", "EUR")
-        assert "EUR" in repr(a)
+def shares(value):
+    return None if value is None else abs(Decimal(str(value))).normalize()
 
 
 # ---------------------------------------------------------------------------
-# Converter.process — event dispatch and filtering
+# Specification: upstream transactions -> PP rows
 # ---------------------------------------------------------------------------
 
 
-class TestConverterProcess:
-    def test_buy_order_returns_investment(self):
-        event = load_fixture("buy.json")
-        results = Converter().process([event])
-        assert len(results) == 1
-        assert isinstance(results[0], Investment)
-
-    def test_buy_order_isin(self):
-        event = load_fixture("buy.json")
-        result = Converter().process([event])[0]
-        assert result.isin == "IE00B4K6B022"
-
-    def test_buy_order_shares(self):
-        event = load_fixture("buy.json")
-        result = Converter().process([event])[0]
-        assert result.shares == Decimal("60")
-
-    def test_buy_order_type_is_kauf(self):
-        event = load_fixture("buy.json")
-        result = Converter().process([event])[0]
-        assert result.type == "Kauf"
-
-    def test_buy_order_costs(self):
-        event = load_fixture("buy.json")
-        result = Converter().process([event])[0]
-        assert result.costs.value == Decimal("1.00")
-        assert result.costs.currency == "EUR"
-
-    def test_buy_order_no_taxes(self):
-        event = load_fixture("buy.json")
-        result = Converter().process([event])[0]
-        assert result.taxes.value == Decimal("0.00")
-
-    def test_buy_order_name(self):
-        event = load_fixture("buy.json")
-        result = Converter().process([event])[0]
-        assert result.name == "Euro Stoxx 50 EUR (Dist)"
-
-    def test_dividend_returns_payment(self):
-        event = load_fixture("bardividende.json")
-        results = Converter().process([event])
-        assert len(results) == 1
-        assert isinstance(results[0], Payment)
-
-    def test_dividend_isin_from_icon(self):
-        # bardividende.json has no instrumentDetail action; ISIN falls back to icon
-        event = load_fixture("bardividende.json")
-        result = Converter().process([event])[0]
-        assert result.isin == "US20030N1019"
-
-    def test_dividend_name(self):
-        event = load_fixture("bardividende.json")
-        result = Converter().process([event])[0]
-        assert result.name == "Comcast (A)"
-
-    def test_dividend_shares(self):
-        event = load_fixture("bardividende.json")
-        result = Converter().process([event])[0]
-        assert result.shares == Decimal("10.640298")
-
-    def test_interest_payout_has_taxes(self):
-        event = load_fixture("zinsen.json")
-        result = Converter().process([event])[0]
-        assert isinstance(result, InterestPayout)
-        assert result.taxes.value == Decimal("1.87")
-
-    def test_ignored_event_type_excluded_from_output(self):
-        event = {
-            "eventType": "ORDER_CANCELED",
-            "timestamp": "2024-01-01T00:00:00+0000",
-            "amount": {"value": "0", "currency": "EUR", "fractionDigits": 2},
-        }
-        results = Converter().process([event])
-        assert results == []
-
-    def test_unknown_event_type_produces_unknown_object(self):
-        event = {
-            "eventType": "SOME_FUTURE_UNKNOWN_EVENT",
-            "timestamp": "2024-01-01T00:00:00+0000",
-            "amount": {"value": "0", "currency": "EUR", "fractionDigits": 2},
-        }
-        results = Converter().process([event])
-        assert len(results) == 1
-        assert isinstance(results[0], Unknown)
-
-    def test_mixed_events_correct_counts(self):
-        buy = load_fixture("buy.json")
-        dividend = load_fixture("bardividende.json")
-        ignored = {
-            "eventType": "ORDER_CANCELED",
-            "timestamp": "2024-01-01T00:00:00+0000",
-            "amount": {"value": "0", "currency": "EUR", "fractionDigits": 2},
-        }
-        results = Converter().process([buy, dividend, ignored])
-        assert len(results) == 2
-
-
-# ---------------------------------------------------------------------------
-# Converter.convert — CSV output
-# ---------------------------------------------------------------------------
-
-
-class TestConverterConvert:
-    def test_orders_csv_created(self, tmp_path):
-        event = load_fixture("buy.json")
-        orders_file = tmp_path / "orders.csv"
-        Converter().convert([event], None, orders_file)
-        assert orders_file.exists()
-
-    def test_orders_csv_header(self, tmp_path):
-        event = load_fixture("buy.json")
-        orders_file = tmp_path / "orders.csv"
-        Converter().convert([event], None, orders_file)
-        first_line = orders_file.read_text(encoding="utf-8").splitlines()[0]
-        assert first_line == "Wert;Buchungswährung;Datum;Uhrzeit;Typ;Notiz;Gebühren;Steuern;ISIN;Wertpapiername;Stück"
-
-    def test_orders_csv_one_data_row(self, tmp_path):
-        event = load_fixture("buy.json")
-        orders_file = tmp_path / "orders.csv"
-        Converter().convert([event], None, orders_file)
-        lines = orders_file.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 2  # header + 1 row
-
-    def test_orders_csv_contains_isin(self, tmp_path):
-        event = load_fixture("buy.json")
-        orders_file = tmp_path / "orders.csv"
-        Converter().convert([event], None, orders_file)
-        content = orders_file.read_text(encoding="utf-8")
-        assert "IE00B4K6B022" in content
-
-    def test_payments_csv_created(self, tmp_path):
-        event = load_fixture("bardividende.json")
-        payments_file = tmp_path / "payments.csv"
-        Converter().convert([event], payments_file, None)
-        assert payments_file.exists()
-
-    def test_payments_csv_header(self, tmp_path):
-        event = load_fixture("bardividende.json")
-        payments_file = tmp_path / "payments.csv"
-        Converter().convert([event], payments_file, None)
-        first_line = payments_file.read_text(encoding="utf-8").splitlines()[0]
-        assert first_line == "Wert;Buchungswährung;Datum;Uhrzeit;Typ;Notiz;Steuern;ISIN;Wertpapiername;Stück"
-
-    def test_payments_csv_one_data_row(self, tmp_path):
-        event = load_fixture("bardividende.json")
-        payments_file = tmp_path / "payments.csv"
-        Converter().convert([event], payments_file, None)
-        lines = payments_file.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 2  # header + 1 row
-
-    def test_payments_csv_contains_isin(self, tmp_path):
-        event = load_fixture("bardividende.json")
-        payments_file = tmp_path / "payments.csv"
-        Converter().convert([event], payments_file, None)
-        content = payments_file.read_text(encoding="utf-8")
-        assert "US20030N1019" in content
-
-    def test_investment_not_written_to_payments(self, tmp_path):
-        event = load_fixture("buy.json")
-        payments_file = tmp_path / "payments.csv"
-        Converter().convert([event], payments_file, None)
-        lines = payments_file.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 1  # header only, no data rows
-
-    def test_payment_not_written_to_orders(self, tmp_path):
-        event = load_fixture("bardividende.json")
-        orders_file = tmp_path / "orders.csv"
-        Converter().convert([event], None, orders_file)
-        lines = orders_file.read_text(encoding="utf-8").strip().splitlines()
-        assert len(lines) == 1  # header only, no data rows
-
-
-# ---------------------------------------------------------------------------
-# _detail_text and _get_section_new helpers
-# ---------------------------------------------------------------------------
-
-
-class TestDetailHelpers:
-    def test_detail_text_with_dict(self):
-        assert _detail_text({"text": "hello", "type": "text"}) == "hello"
-
-    def test_detail_text_with_string(self):
-        assert _detail_text("hello") == "hello"
-
-    def test_detail_text_with_none(self):
-        assert _detail_text(None) == ""
-
-    def test_detail_text_dict_missing_text_key(self):
-        assert _detail_text({"type": "status"}) == ""
-
-    def test_get_section_new_reads_first_matching_title(self):
-        event = {
-            "details": {
-                "sections": [
-                    {
-                        "title": "Übersicht",
-                        "data": [
-                            {"title": "Asset", "detail": {"text": "NVIDIA", "type": "text"}},
-                            {"title": "Gebühr", "detail": {"text": "1,00 €", "type": "text"}},
-                        ],
-                    }
-                ]
-            }
-        }
-        section = _get_section_new(event, "Übersicht")
-        assert section["Asset"] == "NVIDIA"
-        assert section["Gebühr"] == "1,00 €"
-
-    def test_get_section_new_returns_empty_dict_for_missing_section(self):
-        event = {"details": {"sections": []}}
-        assert _get_section_new(event, "Übersicht") == {}
-
-    def test_get_section_new_accepts_multiple_title_candidates(self):
-        event = {
-            "details": {
-                "sections": [
-                    {
-                        "title": "Geschäft",
-                        "data": [{"title": "Steuern", "detail": {"text": "1,87 €"}}],
-                    }
-                ]
-            }
-        }
-        # Should find 'Geschäft' when searching for ('Transaktion', 'Geschäft')
-        section = _get_section_new(event, "Transaktion", "Geschäft")
-        assert section["Steuern"] == "1,87 €"
-
-
-# ---------------------------------------------------------------------------
-# _parse_transaction_text
-# ---------------------------------------------------------------------------
-
-
-class TestParseTransactionText:
-    def test_integer_shares(self):
-        shares, price = _parse_transaction_text("2 ×  37,30 €")
-        assert shares == Decimal("2")
-
-    def test_fractional_shares_comma_decimal(self):
-        shares, price = _parse_transaction_text("0,685102 ×  160,56 €")
-        assert shares == Decimal("0.685102")
-
-    def test_fractional_shares_dot_decimal(self):
-        shares, price = _parse_transaction_text("0.685102 × 160,56 €")
-        assert shares == Decimal("0.685102")
-
-    def test_thousands_separator_dot(self):
-        shares, price = _parse_transaction_text("1.000 × 5,00 €")
-        assert shares == Decimal("1000")
-
-    def test_price_text_returned(self):
-        _, price = _parse_transaction_text("3 × 328,70 €")
-        assert "328" in price
-        assert "€" in price
-
-    def test_empty_string_returns_none(self):
-        shares, price = _parse_transaction_text("")
-        assert shares is None
-        assert price is None
-
-    def test_no_match_returns_none(self):
-        shares, price = _parse_transaction_text("Ausgeführt")
-        assert shares is None
-
-
-# ---------------------------------------------------------------------------
-# NewStyleOrder — TRADING_TRADE_EXECUTED
-# ---------------------------------------------------------------------------
-
-
-class TestNewStyleOrder:
-    def _buy_event(self, event_type="TRADING_TRADE_EXECUTED"):
-        event = load_fixture("buy_new.json")
-        event["eventType"] = event_type
-        return event
-
-    def test_dispatched_for_uppercase_event_type(self):
-        results = Converter().process([self._buy_event("TRADING_TRADE_EXECUTED")])
-        assert len(results) == 1
-        assert isinstance(results[0], Investment)
-
-    def test_dispatched_for_lowercase_variant(self):
-        # buy_new.json ships with lowercase 'trading_trade_executed'
-        results = Converter().process([load_fixture("buy_new.json")])
-        assert len(results) == 1
-        assert isinstance(results[0], Investment)
-
-    def test_isin_from_header_section(self):
-        result = Converter().process([self._buy_event()])[0]
-        assert result.isin == "US67066G1040"
-
-    def test_name_from_asset_row(self):
-        result = Converter().process([self._buy_event()])[0]
-        assert result.name == "NVIDIA"
-
-    def test_type_kauf_for_buy_subtitle(self):
-        result = Converter().process([self._buy_event()])[0]
-        assert result.type == "Kauf"
-
-    def test_type_verkauf_for_sell_subtitle(self):
-        event = self._buy_event()
-        event["subtitle"] = "Verkaufsorder"
-        result = Converter().process([event])[0]
-        assert result.type == "Verkauf"
-
-    def test_shares_fractional(self):
-        result = Converter().process([self._buy_event()])[0]
-        assert result.shares == Decimal("0.685102")
-
-    def test_costs_from_gebuehr_row(self):
-        result = Converter().process([self._buy_event()])[0]
-        assert result.costs.value == Decimal("1.00")
-        assert result.costs.currency == "EUR"
-
-    def test_value_is_positive(self):
-        # buy_new.json has negative amount (-111); NewStyleOrder takes abs()
-        result = Converter().process([self._buy_event()])[0]
-        assert result.value.value > 0
-
-    def test_saveback_is_einlieferung(self):
-        event = {
-            "eventType": "SAVEBACK_AGGREGATE",
-            "timestamp": "2025-01-01T00:00:00+0000",
-            "icon": "logos/IE00B3WJKG14/v2",
-            "amount": {"value": "-15", "currency": "EUR", "fractionDigits": 2},
-            "details": {"sections": []},
-        }
-        result = Converter().process([event])[0]
-        assert result.type == "Einlieferung"
-
-    def test_saveback_zero_costs(self):
-        event = {
-            "eventType": "SAVEBACK_AGGREGATE",
-            "timestamp": "2025-01-01T00:00:00+0000",
-            "icon": "logos/IE00B3WJKG14/v2",
-            "amount": {"value": "-15", "currency": "EUR", "fractionDigits": 2},
-            "details": {"sections": []},
-        }
-        result = Converter().process([event])[0]
-        assert result.costs.value == Decimal("0.00")
-
-    def test_roundup_type_kauf(self):
-        event = {
-            "eventType": "SPARE_CHANGE_AGGREGATE",
-            "timestamp": "2025-01-01T00:00:00+0000",
-            "icon": "logos/IE00B3WJKG14/v2",
-            "amount": {"value": "-10", "currency": "EUR", "fractionDigits": 2},
-            "details": {"sections": []},
-        }
-        result = Converter().process([event])[0]
-        assert result.type == "Kauf"
-
-
-# ---------------------------------------------------------------------------
-# FixedAccountTransferIncoming — shares from Übersicht
-# ---------------------------------------------------------------------------
-
-
-class TestFixedAccountTransferIncoming:
-    def _make_event(self, anteile_text=None):
-        data = []
-        if anteile_text is not None:
-            data.append(
-                {
-                    "title": "Anteile",
-                    "detail": {"text": anteile_text, "type": "text"},
-                    "style": "plain",
-                }
+def expected_pp_rows(transactions: list[dict]) -> list[tuple]:
+    """Translate upstream's expected transactions into (kind, type, value, isin, shares, fees, taxes)."""
+
+    def row(kind, typ, t, value=None, isin=None, n=None):
+        return (
+            kind,
+            typ,
+            money(t.get("Wert") if value is None else value),
+            (t.get("ISIN") if isin is None else isin) or "",
+            shares(t.get("Stück") if n is None else n),
+            money(t.get("Gebühren")) if kind == "order" else Decimal("0.00"),
+            money(t.get("Steuern")),
+        )
+
+    types = [t["Typ"] for t in transactions]
+    if types == ["Kauf", "Einlage"] and money(transactions[0]["Wert"]) == money(transactions[1]["Wert"]):
+        return [row("order", "Einlieferung", transactions[0])]
+
+    rows = []
+    for t in transactions:
+        typ = t["Typ"]
+        if typ in ("Kauf", "Verkauf"):
+            rows.append(row("order", typ, t))
+        elif typ in ("Umbuchung (Eingang)", "Split", "Spinoff"):
+            rows.append(row("order", "Einlieferung", t, value=0))
+        elif typ == "Umbuchung (Ausgang)":
+            rows.append(row("order", "Auslieferung", t, value=0))
+        elif typ == "Swap":
+            cash = Decimal(str(t.get("Wert") or 0))
+            rows.append(row("order", "Verkauf" if cash > 0 else "Auslieferung", t, value=cash if cash > 0 else 0))
+            rows.append(
+                row(
+                    "order",
+                    "Kauf" if cash < 0 else "Einlieferung",
+                    t,
+                    value=cash if cash < 0 else 0,
+                    isin=t.get("ISIN2"),
+                    n=t.get("Stück2"),
+                )
             )
-        return {
-            "eventType": "ACCOUNT_TRANSFER_INCOMING",
-            "timestamp": "2025-01-01T00:00:00+0000",
-            "icon": "logos/IE00B4K6B022/v2",  # needed by get_isin icon fallback path
-            "amount": {"value": "0", "currency": "EUR", "fractionDigits": 2},
-            "details": {"sections": [{"title": "Übersicht", "data": data, "type": "table"}]},
-        }
+        elif typ in PAYMENT_TYPES:
+            # Payments without any amount (e.g. a 0,00 dividend) have nothing to book.
+            if money(t.get("Wert")) or money(t.get("Steuern")) or money(t.get("Gebühren")):
+                rows.append(row("payment", typ, t))
+        else:
+            raise AssertionError(f"test spec has no PP mapping for {typ!r}")
+    return rows
 
-    def test_reads_integer_shares_from_ubersicht(self):
-        result = Converter().process([self._make_event("5")])[0]
-        assert result.shares == Decimal("5")
 
-    def test_reads_decimal_shares_from_ubersicht(self):
-        result = Converter().process([self._make_event("5,5")])[0]
-        assert result.shares == Decimal("5.5")
+def actual_pp_rows(rows) -> list[tuple]:
+    return [
+        (r.kind, r.type, r.value, r.isin, r.shares, r.fees if r.kind == "order" else Decimal("0.00"), r.taxes)
+        for r in rows
+    ]
 
-    def test_falls_back_to_one_when_no_anteile(self):
-        result = Converter().process([self._make_event()])[0]
-        assert result.shares == 1  # base class fallback
 
-    def test_dispatches_to_fixed_class(self):
-        result = Converter().process([self._make_event("3")])[0]
-        assert isinstance(result, FixedAccountTransferIncoming)
+@pytest.mark.parametrize("case", UPSTREAM_CASES, ids=[c["filename"] for c in UPSTREAM_CASES])
+def test_upstream_fixture_converts_to_expected_pp_rows(case):
+    rows, report = Converter().process([load_event(case["filename"])])
+
+    assert report.errors == []
+    assert report.unknown == []
+
+    if case.get("event_type") is None:
+        assert rows == []
+        assert sum(report.ignored.values()) == 1
+        return
+
+    expected = expected_pp_rows(case.get("transactions", []))
+    assert actual_pp_rows(rows) == expected
+    assert report.converted == (1 if expected else 0)
+
+
+def test_every_fixture_file_is_covered_by_upstream_cases():
+    covered = {c["filename"] for c in UPSTREAM_CASES}
+    on_disk = {p.name for p in EVENTS_DIR.glob("*.json")}
+    assert on_disk - covered == set()
+
+
+def test_all_fixtures_in_one_run_have_no_gaps():
+    events = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(EVENTS_DIR.glob("*.json"))]
+    _, report = Converter().process(events)
+    assert report.gaps == []
+    assert report.total == len(events)
+    assert report.converted + sum(report.ignored.values()) == len(events)
 
 
 # ---------------------------------------------------------------------------
-# NewStyleDividend — SSP_CORPORATE_ACTION_CASH
+# Regressions from the audit
 # ---------------------------------------------------------------------------
 
 
-class TestNewStyleDividend:
-    def _make_event(self, include_shares=True, shares_text="10"):
-        data = [
-            {"title": "Steuern", "detail": {"text": "1,50 €", "type": "text"}, "style": "plain"},
+class TestEventsWithoutEventType:
+    """TR delivers some events without an eventType key; the old converter crashed on them."""
+
+    @pytest.mark.parametrize("name", ["buy_new_no_eventType.json", "buy_new2.json", "buy_no_eventType.json"])
+    def test_buy_without_event_type_is_exported(self, name):
+        event = load_event(name)
+        assert "eventType" not in event
+        rows, report = Converter().process([event])
+        assert report.gaps == []
+        assert [(r.kind, r.type) for r in rows] == [("order", "Kauf")]
+
+    def test_buy_values(self):
+        (row,), _ = Converter().process([load_event("buy_new_no_eventType.json")])
+        assert row.isin == "US67066G1040"
+        assert row.shares == Decimal("0.685102")
+        assert row.value == Decimal("111.00")
+        assert row.fees == Decimal("1.00")
+
+    def test_does_not_abort_other_events(self):
+        events = [load_event("buy_no_eventType.json"), load_event("bardividende.json")]
+        rows, report = Converter().process(events)
+        assert report.converted == 2
+        assert {r.kind for r in rows} == {"order", "payment"}
+
+
+class TestValuesPreviouslyWrong:
+    def test_sell_taxes_are_exported(self):
+        (row,), _ = Converter().process([load_event("limit-sell-order.json")])
+        assert (row.type, row.taxes, row.shares) == ("Verkauf", Decimal("17.36"), Decimal("11"))
+
+    def test_dividend_taxes_and_shares(self):
+        (row,), _ = Converter().process([load_event("bardividende.json")])
+        assert (row.type, row.value, row.taxes, row.shares) == (
+            "Dividende",
+            Decimal("2.24"),
+            Decimal("0.78"),
+            Decimal("10.640298"),
+        )
+
+    def test_negative_corporate_action_cash_is_taxes(self):
+        (row,), _ = Converter().process([load_event("vorabpauschale_negative.json")])
+        assert row.type == "Steuern"
+
+    def test_legacy_migrated_trade_is_exported(self):
+        (row,), report = Converter().process([load_event("legacy_verkauforder_neu_abgerechnet.json")])
+        assert report.gaps == []
+        assert (row.type, row.shares) == ("Verkauf", Decimal("27"))
+
+    def test_trade_invoice_type_is_kauf_not_order_kind(self):
+        (row,), _ = Converter().process([load_event("trade_invoice.json")])
+        assert row.type == "Kauf"
+
+    def test_saveback_is_single_delivery(self):
+        rows, _ = Converter().process([load_event("saveback.json")])
+        assert [(r.kind, r.type, r.value) for r in rows] == [("order", "Einlieferung", Decimal("15.00"))]
+
+    def test_split_adds_shares(self):
+        (row,), _ = Converter().process([load_event("aktiensplit.json")])
+        assert (row.type, row.value, row.shares) == ("Einlieferung", Decimal("0.00"), Decimal("49"))
+
+    def test_swap_with_cash_is_delivery_out_and_buy(self):
+        rows, _ = Converter().process([load_event("zwischenpapiere.json")])
+        assert [(r.type, r.isin, r.shares, r.value) for r in rows] == [
+            ("Auslieferung", "DK0064307839", Decimal("119"), Decimal("0.00")),
+            ("Kauf", "DK0064307755", Decimal("17"), Decimal("151.59")),
         ]
-        if include_shares:
-            data.append({"title": "Anteile", "detail": {"text": shares_text, "type": "text"}, "style": "plain"})
-        return {
-            "eventType": "SSP_CORPORATE_ACTION_CASH",
-            "timestamp": "2025-01-01T00:00:00+0000",
-            "title": "Test Corp",
-            "amount": {"value": "10.00", "currency": "EUR", "fractionDigits": 2},
-            "details": {
-                "sections": [
-                    {
-                        "type": "header",
-                        "action": {"type": "instrumentDetail", "payload": "US1234567890"},
-                    },
-                    {"title": "Geschäft", "data": data, "type": "table"},
-                ]
-            },
+
+
+def test_payment_fee_is_kept_visible():
+    """payments.csv has no fee column; a deposit fee must not vanish silently."""
+    (row,), report = Converter().process([load_event("payment_inbound_credit_card.json")])
+    assert (row.type, row.value) == ("Einlage", Decimal("1000.00"))
+    assert "Gebühren 7,00 EUR" in row.note
+    assert [w.detail for w in report.warnings] == [
+        "fee of 7,00 EUR is not booked in payments.csv; verify the cash balance"
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Robustness: nothing is dropped silently, nothing aborts the export
+# ---------------------------------------------------------------------------
+
+
+class TestRobustness:
+    @pytest.mark.parametrize(
+        "bad_event",
+        [
+            {},
+            {"id": "x"},
+            {"id": "x", "timestamp": "not a date", "title": "t", "subtitle": "s"},
+            {"id": "x", "timestamp": "2026-08-01T10:00:00.000+0000", "title": "t", "subtitle": "s", "details": None},
+        ],
+    )
+    def test_malformed_event_is_reported_not_raised(self, bad_event):
+        rows, report = Converter().process([bad_event, load_event("buy.json")])
+        assert len(report.errors) == 1
+        assert report.converted == 1
+        assert len(rows) == 1
+
+    def test_unknown_event_type_is_reported(self):
+        event = {
+            "id": "abc",
+            "timestamp": "2026-08-01T10:00:00.000+0000",
+            "title": "Something new",
+            "subtitle": "Brand new",
+            "eventType": "BRAND_NEW_TR_EVENT",
         }
+        rows, report = Converter().process([event])
+        assert rows == []
+        assert [i.key for i in report.unknown] == ["BRAND_NEW_TR_EVENT"]
+        assert "Something new" in report.unknown[0].event
 
-    def test_dispatched_as_payment(self):
-        result = Converter().process([self._make_event()])[0]
-        assert isinstance(result, Payment)
+    def test_known_non_financial_event_is_ignored_not_unknown(self):
+        _, report = Converter().process([load_event("address_changed.json")])
+        assert report.gaps == []
+        assert report.ignored == {"ADDRESS_CHANGED": 1}
 
-    def test_isin_from_header(self):
-        result = Converter().process([self._make_event()])[0]
-        assert result.isin == "US1234567890"
+    def test_unmapped_pp_type_is_an_error(self, monkeypatch):
+        converter = Converter()
+        monkeypatch.setattr(
+            converter._exporter,
+            "from_event",
+            lambda event: iter([{"Typ": "Zauberei", "Wert": 1, "Notiz": "", "ISIN": None, "Stück": None}]),
+        )
+        rows, report = converter.process([load_event("buy.json")])
+        assert rows == []
+        assert "Zauberei" in report.errors[0].detail
 
-    def test_taxes_parsed(self):
-        result = Converter().process([self._make_event()])[0]
-        assert result.taxes.value == Decimal("1.50")
+    def test_parser_warnings_are_reported(self):
+        event = load_event("buy.json")
+        event["details"]["sections"] = [s for s in event["details"]["sections"] if s.get("title") != "Transaktion"]
+        _, report = Converter().process([event])
+        assert any("shares" in w.detail for w in report.warnings)
 
-    def test_csv_with_shares_no_none_literal(self):
-        result = Converter().process([self._make_event(include_shares=True)])[0]
-        assert "None" not in result.csv()
+    def test_log_handler_is_removed(self, monkeypatch):
+        handlers_before = list(get_event_logger().handlers)
+        converter = Converter()
 
-    def test_csv_without_shares_no_none_literal(self):
-        # Regression: old Dividend.csv() called str(None) → 'None'
-        result = Converter().process([self._make_event(include_shares=False)])[0]
-        assert "None" not in result.csv()
+        def boom(raw, event):
+            raise KeyboardInterrupt
 
+        monkeypatch.setattr(converter, "rows_for_event", boom)
+        with pytest.raises(KeyboardInterrupt):
+            converter.process([load_event("buy.json")])
+        assert get_event_logger().handlers == handlers_before
 
-# ---------------------------------------------------------------------------
-# CardPayment and NewStyleCardRefund
-# ---------------------------------------------------------------------------
-
-
-class TestCardPayment:
-    def _make_card_event(self, event_type, amount_value):
-        return {
-            "eventType": event_type,
-            "timestamp": "2025-01-01T00:00:00+0000",
-            "amount": {"value": str(amount_value), "currency": "EUR", "fractionDigits": 2},
-        }
-
-    def test_card_transaction_value_is_positive(self):
-        event = self._make_card_event("CARD_TRANSACTION", -50)
-        result = Converter().process([event])[0]
-        assert result.value.value > 0
-
-    def test_card_aft_value_is_positive(self):
-        event = self._make_card_event("CARD_AFT", -30)
-        result = Converter().process([event])[0]
-        assert result.value.value > 0
-
-    def test_card_payment_type_is_entnahme(self):
-        event = self._make_card_event("CARD_TRANSACTION", -50)
-        result = Converter().process([event])[0]
-        assert result.type == "Entnahme"
-
-    def test_card_payment_note_includes_title(self):
-        event = {**self._make_card_event("CARD_TRANSACTION", -50), "title": "Lidl"}
-        result = Converter().process([event])[0]
-        assert result.note == "Konsum - Lidl"
-
-    def test_card_refund_note_includes_title(self):
-        event = {**self._make_card_event("CARD_REFUND", 20), "title": "Amazon"}
-        result = Converter().process([event])[0]
-        assert result.note == "Konsum - Amazon"
-
-    def test_card_refund_value_is_positive(self):
-        event = self._make_card_event("CARD_REFUND", -20)
-        result = Converter().process([event])[0]
-        assert result.value.value > 0
-
-    def test_card_refund_type_is_einlage(self):
-        event = self._make_card_event("CARD_REFUND", 20)
-        result = Converter().process([event])[0]
-        assert result.type == "Einlage"
-
-    def test_card_verification_ignored(self):
-        event = self._make_card_event("CARD_VERIFICATION", 0)
-        results = Converter().process([event])
-        assert results == []
-
-    # Regression: rejected/cancelled card transactions must not appear in payments.csv
-    def test_card_transaction_abgelehnt_ignored(self):
-        event = {**self._make_card_event("CARD_TRANSACTION", -50), "subtitle": "Abgelehnt"}
-        assert Converter().process([event]) == []
-
-    def test_card_transaction_abgebrochen_ignored(self):
-        event = {**self._make_card_event("CARD_TRANSACTION", -50), "subtitle": "Abgebrochen"}
-        assert Converter().process([event]) == []
-
-    def test_card_transaction_no_subtitle_is_payment(self):
-        event = self._make_card_event("CARD_TRANSACTION", -50)
-        results = Converter().process([event])
-        assert len(results) == 1
-        assert isinstance(results[0], Payment)
+    def test_rows_sorted_by_date(self):
+        newer, older = load_event("buy_new.json"), load_event("buy.json")
+        rows, _ = Converter().process([newer, older])
+        assert [r.dt for r in rows] == sorted(r.dt for r in rows)
 
 
 # ---------------------------------------------------------------------------
-# New event type dispatch — bank transfers and new Ignores
+# CSV output
 # ---------------------------------------------------------------------------
 
 
-class TestNewEventTypeMappings:
-    def _simple(self, event_type, amount_value=0):
-        return {
-            "eventType": event_type,
-            "timestamp": "2025-01-01T00:00:00+0000",
-            "amount": {"value": str(amount_value), "currency": "EUR", "fractionDigits": 2},
-        }
+def read_csv(path: Path) -> list[list[str]]:
+    with open(path, encoding="utf-8", newline="") as fh:
+        return list(csv.reader(fh, delimiter=";"))
 
-    def test_bank_transaction_incoming_dispatches_to_payment_inbound(self):
-        result = Converter().process([self._simple("BANK_TRANSACTION_INCOMING", 100)])[0]
-        assert isinstance(result, PaymentInbound)
 
-    def test_bank_transaction_outgoing_dispatches_to_payment_outbound(self):
-        result = Converter().process([self._simple("BANK_TRANSACTION_OUTGOING", 50)])[0]
-        assert isinstance(result, PaymentOutbound)
+class TestCsvOutput:
+    def test_headers(self, tmp_path):
+        Converter().convert([], tmp_path / "payments.csv", tmp_path / "orders.csv")
+        assert read_csv(tmp_path / "orders.csv") == [ORDERS_HEADER]
+        assert read_csv(tmp_path / "payments.csv") == [PAYMENTS_HEADER]
 
-    def test_bank_transaction_outgoing_direct_debit_dispatches(self):
-        result = Converter().process([self._simple("BANK_TRANSACTION_OUTGOING_DIRECT_DEBIT", 50)])[0]
-        assert isinstance(result, PaymentOutbound)
+    def test_order_row(self, tmp_path):
+        Converter().convert([load_event("buy_new_no_eventType.json")], None, tmp_path / "orders.csv")
+        (_, row) = read_csv(tmp_path / "orders.csv")
+        record = dict(zip(ORDERS_HEADER, row))
+        assert record["Wert"] == "111,00"
+        assert record["Buchungswährung"] == "EUR"
+        assert record["Typ"] == "Kauf"
+        assert record["Gebühren"] == "1,00"
+        assert record["ISIN"] == "US67066G1040"
+        assert record["Stück"] == "0,685102"
+        assert record["Datum"].count(".") == 2 and record["Uhrzeit"].count(":") == 2
 
-    def test_bank_transaction_outgoing_scheduled_is_ignored(self):
-        assert Converter().process([self._simple("BANK_TRANSACTION_OUTGOING_SCHEDULED")]) == []
+    def test_payment_row(self, tmp_path):
+        Converter().convert([load_event("bardividende.json")], tmp_path / "payments.csv", None)
+        (_, row) = read_csv(tmp_path / "payments.csv")
+        record = dict(zip(PAYMENTS_HEADER, row))
+        assert (record["Wert"], record["Typ"], record["Steuern"], record["Stück"]) == (
+            "2,24",
+            "Dividende",
+            "0,78",
+            "10,640298",
+        )
 
-    def test_trading_order_cancelled_is_ignored(self):
-        assert Converter().process([self._simple("TRADING_ORDER_CANCELLED")]) == []
+    def test_date_is_local_time(self, tmp_path):
+        event = load_event("buy.json")
+        Converter().convert([event], None, tmp_path / "orders.csv")
+        (_, row) = read_csv(tmp_path / "orders.csv")
+        from datetime import datetime
 
-    def test_trading_savingsplan_execution_failed_is_ignored(self):
-        assert Converter().process([self._simple("TRADING_SAVINGSPLAN_EXECUTION_FAILED")]) == []
+        local = datetime.fromisoformat(event["timestamp"][:-2] + ":" + event["timestamp"][-2:]).astimezone()
+        assert (row[2], row[3]) == (f"{local:%d.%m.%Y}", f"{local:%H:%M:%S}")
 
-    def test_order_rejected_is_ignored(self):
-        assert Converter().process([self._simple("ORDER_REJECTED")]) == []
+    def test_delimiter_in_name_is_quoted(self, tmp_path):
+        event = load_event("buy.json")
+        event["title"] = "Foo; Bar"
+        Converter().convert([event], None, tmp_path / "orders.csv")
+        (_, row) = read_csv(tmp_path / "orders.csv")
+        assert len(row) == len(ORDERS_HEADER)
+        assert row[ORDERS_HEADER.index("Wertpapiername")] == "Foo; Bar"
 
-    def test_ssp_corporate_action_activity_is_ignored(self):
-        assert Converter().process([self._simple("SSP_CORPORATE_ACTION_ACTIVITY")]) == []
+    def test_orders_and_payments_are_split(self, tmp_path):
+        events = [load_event("buy.json"), load_event("bardividende.json"), load_event("deposit.json")]
+        report = Converter().convert(events, tmp_path / "payments.csv", tmp_path / "orders.csv")
+        assert len(read_csv(tmp_path / "orders.csv")) - 1 == report.orders == 1
+        assert len(read_csv(tmp_path / "payments.csv")) - 1 == report.payments == 2
 
-    def test_ssp_corporate_action_no_cash_is_ignored(self):
-        assert Converter().process([self._simple("SSP_CORPORATE_ACTION_NO_CASH")]) == []
 
-    def test_documents_changed_is_ignored(self):
-        assert Converter().process([self._simple("DOCUMENTS_CHANGED")]) == []
+# ---------------------------------------------------------------------------
+# pytrpp2 rules — events upstream mishandles, found in a real export (anonymised)
+# ---------------------------------------------------------------------------
 
-    def test_sharebooking_is_ignored(self):
-        assert Converter().process([self._simple("SHAREBOOKING")]) == []
+PP_EVENTS_DIR = Path(__file__).parent / "pp_events"
 
-    def test_general_meeting_is_ignored(self):
-        assert Converter().process([self._simple("GENERAL_MEETING")]) == []
 
-    def test_tax_year_end_report_created_is_ignored(self):
-        assert Converter().process([self._simple("TAX_YEAR_END_REPORT_CREATED")]) == []
+def load_pp_event(name: str) -> dict:
+    return json.loads((PP_EVENTS_DIR / name).read_text(encoding="utf-8"))
 
-    # Regression: types seen in the wild that were previously unmapped gaps
-    def test_ssp_corporate_action_instruction_is_ignored(self):
-        assert Converter().process([self._simple("SSP_CORPORATE_ACTION_INSTRUCTION")]) == []
 
-    def test_address_changed_is_ignored(self):
-        assert Converter().process([self._simple("ADDRESS_CHANGED")]) == []
+class TestPytrpp2Rules:
+    def test_securities_transfer_in_books_shares(self):
+        """Regression: upstream booked "Du hast 3 Aktien erhalten" as a 0 € cash deposit."""
+        rows, report = Converter().process([load_pp_event("account_transfer_incoming.json")])
+        assert report.gaps == []
+        assert [(r.kind, r.type, r.value, r.isin, r.shares) for r in rows] == [
+            ("order", "Einlieferung", Decimal("0.00"), "DE0005493365", Decimal("3"))
+        ]
 
-    def test_cash_account_changed_is_ignored(self):
-        assert Converter().process([self._simple("CASH_ACCOUNT_CHANGED")]) == []
+    def test_securities_transfer_out_books_shares(self):
+        event = load_pp_event("account_transfer_incoming.json")
+        event["eventType"] = "ACCOUNT_TRANSFER_OUTGOING"
+        (row,), _ = Converter().process([event])
+        assert (row.type, row.shares) == ("Auslieferung", Decimal("3"))
 
-    def test_exemption_order_change_requested_automatically_is_ignored(self):
-        assert Converter().process([self._simple("EXEMPTION_ORDER_CHANGE_REQUESTED_AUTOMATICALLY")]) == []
+    def test_cash_account_transfer_stays_with_upstream(self):
+        event = load_pp_event("account_transfer_incoming.json")
+        event["amount"] = {"currency": "EUR", "value": 100.0, "fractionDigits": 2}
+        rows, _ = Converter().process([event])
+        assert [(r.kind, r.type, r.value) for r in rows] == [("payment", "Einlage", Decimal("100.00"))]
+
+    def test_spinoff_share_bookings_net_to_holding(self):
+        """Regression: Veralto spin-off (+1, cancelled -1, re-booked +1) was ignored entirely,
+        so the later sale of 1 share had no holding in PP."""
+        events = [
+            load_pp_event("sharebooking.json"),
+            load_pp_event("sharebooking_canceled.json"),
+            load_pp_event("sharebooking2.json"),
+        ]
+        rows, report = Converter().process(events)
+        assert report.gaps == []
+        assert [(r.type, r.isin, r.shares) for r in rows] == [
+            ("Einlieferung", "US92338C1036", Decimal("1")),
+            ("Auslieferung", "US92338C1036", Decimal("1")),
+            ("Einlieferung", "US92338C1036", Decimal("1")),
+        ]
+
+    def test_sharebooking_without_share_count_is_an_error(self):
+        event = load_pp_event("sharebooking.json")
+        for section in event["details"]["sections"]:
+            if section.get("title") == "Transaktion":
+                section["data"] = []
+        rows, report = Converter().process([event])
+        assert rows == []
+        assert "share booking without share count" in report.errors[0].detail
 
     def test_exemption_order_created_is_ignored(self):
-        assert Converter().process([self._simple("EXEMPTION_ORDER_CREATED")]) == []
+        rows, report = Converter().process([load_pp_event("exemption_order_created.json")])
+        assert (rows, report.gaps, report.ignored) == ([], [], {"EXEMPTION_ORDER_CREATED": 1})
+
+    def test_zero_vorabpauschale_books_nothing(self):
+        """Regression: a Vorabpauschale covered by the allowance produced a 'Steuern 0,00' row."""
+        rows, report = Converter().process([load_pp_event("vorabpauschale_zero.json")])
+        assert rows == []
+        assert report.gaps == []
+        assert sum(report.ignored.values()) == 1
+
+    def test_no_gaps_in_pp_fixtures(self):
+        events = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(PP_EVENTS_DIR.glob("*.json"))]
+        _, report = Converter().process(events)
+        assert report.gaps == []

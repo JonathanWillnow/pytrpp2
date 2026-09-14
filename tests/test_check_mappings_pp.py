@@ -3,8 +3,29 @@
 import json
 from pathlib import Path
 
+import pytest
+
 from pytr.check_mappings_pp import find_gaps, print_gap_report
-from pytr.conv_pp import Converter, Ignore
+from pytr.conv_pp import Converter
+
+EVENTS_DIR = Path(__file__).parent / "events"
+
+
+def load_event(name: str) -> dict:
+    return json.loads((EVENTS_DIR / name).read_text(encoding="utf-8"))
+
+
+def unknown_event(event_type="BRAND_NEW_TR_EVENT", **overrides) -> dict:
+    event = {
+        "id": "id-1",
+        "timestamp": "2026-08-01T10:00:00.000+0000",
+        "title": "Hypoport",
+        "subtitle": "Etwas Neues",
+        "eventType": event_type,
+    }
+    event.update(overrides)
+    return event
+
 
 # ---------------------------------------------------------------------------
 # find_gaps
@@ -12,52 +33,31 @@ from pytr.conv_pp import Converter, Ignore
 
 
 class TestFindGaps:
-    def test_known_type_not_a_gap(self):
-        # Pick a known type from Converter.event_types
-        known_type = next(iter(Converter.event_types))
-        events = [{"eventType": known_type}]
-        assert find_gaps(events) == {}
+    def test_converted_event_is_not_a_gap(self):
+        assert find_gaps([load_event("buy.json")]) == {}
+
+    def test_ignored_event_is_not_a_gap(self):
+        assert find_gaps([load_event("address_changed.json")]) == {}
 
     def test_unknown_type_is_a_gap(self):
-        events = [{"eventType": "COMPLETELY_UNKNOWN_XYZ"}]
-        gaps = find_gaps(events)
-        assert "COMPLETELY_UNKNOWN_XYZ" in gaps
-        assert gaps["COMPLETELY_UNKNOWN_XYZ"] == 1
+        assert find_gaps([unknown_event(), unknown_event(id="id-2")]) == {"BRAND_NEW_TR_EVENT": 2}
 
-    def test_gap_count_is_correct(self):
-        events = [{"eventType": "MYSTERY_EVENT"}] * 5
-        gaps = find_gaps(events)
-        assert gaps["MYSTERY_EVENT"] == 5
+    def test_unknown_event_without_event_type_is_keyed_by_subtitle(self):
+        event = unknown_event()
+        del event["eventType"]
+        assert find_gaps([event]) == {"<missing>: Etwas Neues": 1}
 
-    def test_ignore_type_is_not_a_gap(self):
-        # Ignore types ARE in Converter.event_types, so they are not gaps
-        ignore_type = next(k for k, v in Converter.event_types.items() if v is Ignore)
-        events = [{"eventType": ignore_type}]
-        assert find_gaps(events) == {}
+    def test_classifiable_event_without_event_type_is_not_a_gap(self):
+        assert find_gaps([load_event("buy_new_no_eventType.json")]) == {}
 
-    def test_mixed_events(self):
-        known_type = next(k for k, v in Converter.event_types.items() if v is not Ignore)
-        events = [
-            {"eventType": known_type},
-            {"eventType": "GAP_TYPE_1"},
-            {"eventType": "GAP_TYPE_2"},
-            {"eventType": "GAP_TYPE_1"},
-        ]
-        gaps = find_gaps(events)
-        assert known_type not in gaps
-        assert gaps["GAP_TYPE_1"] == 2
-        assert gaps["GAP_TYPE_2"] == 1
-
-    def test_missing_event_type_key(self):
-        events = [{}]  # no 'eventType' key
-        gaps = find_gaps(events)
-        assert "<missing>" in gaps
+    def test_malformed_event_is_a_gap(self):
+        assert find_gaps([{}]) == {"<missing>": 1}
 
     def test_empty_events(self):
         assert find_gaps([]) == {}
 
-    def test_all_converter_types_are_not_gaps(self):
-        events = [{"eventType": et} for et in Converter.event_types]
+    def test_no_gaps_in_any_fixture(self):
+        events = [json.loads(p.read_text(encoding="utf-8")) for p in sorted(EVENTS_DIR.glob("*.json"))]
         assert find_gaps(events) == {}
 
 
@@ -68,95 +68,95 @@ class TestFindGaps:
 
 class TestPrintGapReport:
     def test_no_gaps_prints_ok(self, capsys):
-        known_type = next(iter(Converter.event_types))
-        print_gap_report([{"eventType": known_type}])
-        captured = capsys.readouterr()
-        assert "OK" in captured.out
+        print_gap_report([load_event("buy.json")])
+        out = capsys.readouterr().out
+        assert "OK" in out
+        assert "WARNING" not in out
 
-    def test_gap_prints_warning(self, capsys):
-        print_gap_report([{"eventType": "UNKNOWN_TYPE_XYZ"}])
-        captured = capsys.readouterr()
-        assert "WARNING" in captured.out
-        assert "UNKNOWN_TYPE_XYZ" in captured.out
+    def test_gap_prints_warning_with_event_details(self, capsys):
+        print_gap_report([unknown_event()])
+        out = capsys.readouterr().out
+        assert "WARNING" in out
+        assert "BRAND_NEW_TR_EVENT" in out
+        assert "2026-08-01 Hypoport -- Etwas Neues" in out
+
+    def test_error_prints_exception(self, capsys):
+        print_gap_report([{"id": "broken"}])
+        out = capsys.readouterr().out
+        assert "Failed to convert" in out
+        assert "KeyError" in out
+
+    def test_audit_counts(self, capsys):
+        events = [
+            load_event("buy.json"),
+            load_event("bardividende.json"),
+            load_event("address_changed.json"),
+            unknown_event(),
+        ]
+        print_gap_report(events)
+        out = capsys.readouterr().out
+        assert "Events                    : 4" in out
+        assert "Converted                 : 2  (1 order rows, 1 payment rows)" in out
+        assert "Ignored (non-financial)   : 1" in out
+        assert "Unknown                   : 1" in out
 
     def test_ignored_types_printed(self, capsys):
-        ignore_type = next(k for k, v in Converter.event_types.items() if v is Ignore)
-        print_gap_report([{"eventType": ignore_type}])
-        captured = capsys.readouterr()
-        assert ignore_type in captured.out
+        print_gap_report([load_event("address_changed.json")])
+        assert "ADDRESS_CHANGED" in capsys.readouterr().out
 
     def test_empty_events_prints_ok(self, capsys):
         print_gap_report([])
-        captured = capsys.readouterr()
-        assert "OK" in captured.out
+        assert "OK" in capsys.readouterr().out
 
-    def test_registered_absent_section_printed(self, capsys):
-        # Pass an empty list — all registered non-Ignore types will be "absent"
-        print_gap_report([])
-        captured = capsys.readouterr()
-        assert "NOT seen" in captured.out or "Registered" in captured.out
+    def test_uses_given_report_without_reconverting(self, capsys, monkeypatch):
+        events = [unknown_event()]
+        _, report = Converter().process(events)
 
+        def fail(*a, **kw):
+            raise AssertionError("events converted twice")
 
-# ---------------------------------------------------------------------------
-# check_mappings subcommand parser
-# ---------------------------------------------------------------------------
-
-
-class TestCheckMappingsParser:
-    def _get_parser(self):
-        from pytr.main import get_main_parser
-
-        return get_main_parser()
-
-    def test_subcommand_exists(self):
-        parser = self._get_parser()
-        args = parser.parse_args(["check_mappings", "events.json"])
-        assert args.command == "check_mappings"
-
-    def test_events_file_arg(self):
-        parser = self._get_parser()
-        args = parser.parse_args(["check_mappings", "events.json"])
-        assert args.events_file == Path("events.json")
+        monkeypatch.setattr(Converter, "process", fail)
+        print_gap_report(events, report)
+        assert "BRAND_NEW_TR_EVENT" in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------
-# Integration: check_mappings subcommand end-to-end
+# check_mappings subcommand
 # ---------------------------------------------------------------------------
 
 
-class TestCheckMappingsIntegration:
-    def test_runs_on_empty_events_file(self, tmp_path, capsys):
-        ef = tmp_path / "events.json"
-        ef.write_text(json.dumps([]), encoding="utf-8")
-
+class TestCheckMappingsCommand:
+    @pytest.fixture
+    def run(self, monkeypatch):
         import sys
 
+        import pytr.main as m
+        import pytr.utils as u
+
+        def _run(events_file):
+            monkeypatch.setattr(sys, "argv", ["pytrpp2", "check_mappings", str(events_file)])
+            monkeypatch.setattr(u, "log_level", None)
+            m.main()
+
+        return _run
+
+    def test_subcommand_parses_events_file(self):
         from pytr.main import get_main_parser
 
-        old_argv = sys.argv
-        sys.argv = ["pytrpp2", "check_mappings", str(ef)]
-        try:
-            parser = get_main_parser()
-            args = parser.parse_args(["check_mappings", str(ef)])
-            with open(args.events_file, encoding="utf-8") as fh:
-                events = json.load(fh)
-            print_gap_report(events)
-            captured = capsys.readouterr()
-            assert "OK" in captured.out
-        finally:
-            sys.argv = old_argv
+        args = get_main_parser().parse_args(["check_mappings", "events.json"])
+        assert args.command == "check_mappings"
+        assert args.events_file == Path("events.json")
 
-    def test_reports_gap_for_unknown_event(self, tmp_path, capsys):
-        events = [{"eventType": "BRAND_NEW_TR_EVENT"}, {"eventType": "BRAND_NEW_TR_EVENT"}]
+    def test_reports_ok_for_converted_events(self, tmp_path, capsys, run):
         ef = tmp_path / "events.json"
-        ef.write_text(json.dumps(events), encoding="utf-8")
+        ef.write_text(json.dumps([load_event("buy_new_no_eventType.json")]), encoding="utf-8")
+        run(ef)
+        assert "OK" in capsys.readouterr().out
 
-        from pytr.main import get_main_parser
-
-        args = get_main_parser().parse_args(["check_mappings", str(ef)])
-        with open(args.events_file, encoding="utf-8") as fh:
-            loaded = json.load(fh)
-        print_gap_report(loaded)
-        captured = capsys.readouterr()
-        assert "BRAND_NEW_TR_EVENT" in captured.out
-        assert "WARNING" in captured.out
+    def test_reports_gap_for_unknown_event(self, tmp_path, capsys, run):
+        ef = tmp_path / "events.json"
+        ef.write_text(json.dumps([unknown_event(), unknown_event(id="id-2")]), encoding="utf-8")
+        run(ef)
+        out = capsys.readouterr().out
+        assert "BRAND_NEW_TR_EVENT" in out
+        assert "WARNING" in out
