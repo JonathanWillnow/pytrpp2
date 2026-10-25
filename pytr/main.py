@@ -14,7 +14,7 @@ from pathlib import Path
 
 import shtab
 
-from pytr.account import login
+from pytr.account import login, print_accounts
 from pytr.alarms import Alarms
 from pytr.check_mappings_pp import print_gap_report
 from pytr.conv_pp import Converter
@@ -160,6 +160,15 @@ def get_main_parser():
         dest="waf_token",
     )
     parser_login_args.add_argument(
+        "--account",
+        help=(
+            "Use another account of this login, e.g. a company account. Give its type "
+            '(e.g. "LEGAL_ENTITY"), name or customer id as listed by "pytr accounts". '
+            "Defaults to your own account."
+        ),
+        default=None,
+    )
+    parser_login_args.add_argument(
         "--store_credentials",
         help="Store credentials (Phone number, pin, cookies) for next usage",
         action="store_true",
@@ -219,6 +228,16 @@ def get_main_parser():
     )
     parser_cmd.add_parser(
         "login",
+        formatter_class=formatter,
+        parents=[parser_login_args],
+        help=info,
+        description=info,
+    )
+
+    # accounts
+    info = "List accounts of this login, e.g. a company accounts or child accounts. Use them with --account"
+    parser_cmd.add_parser(
+        "accounts",
         formatter_class=formatter,
         parents=[parser_login_args],
         help=info,
@@ -439,11 +458,25 @@ def get_main_parser():
         type=int,
     )
     parser_export_transactions.add_argument(
+        "--from_timestamp",
+        help="Include data from this exact timestamp onwards; overrides --last_days. Local time if no offset given (e.g. 2026-10-01T07:30:00), or with UTC offset (e.g. 2026-10-01T05:30:00+00:00)",
+        metavar="TIMESTAMP",
+        default=None,
+        type=str,
+    )
+    parser_export_transactions.add_argument(
         "--days_until",
         help="Include data up to N days ago (0 = include all days)",
         metavar="DAYS",
         default=0,
         type=int,
+    )
+    parser_export_transactions.add_argument(
+        "--until_timestamp",
+        help="Include data up to this exact timestamp; overrides --days_until. Local time if no offset given (e.g. 2026-10-01T07:30:00), or with UTC offset (e.g. 2026-10-01T05:30:00+00:00)",
+        metavar="TIMESTAMP",
+        default=None,
+        type=str,
     )
     parser_export_transactions.add_argument(
         "--store-event-database",
@@ -693,7 +726,9 @@ def main():
 
     # Compute the timestamp range to get data for
     not_before = 0
-    if hasattr(args, "last_days"):
+    if hasattr(args, "from_timestamp") and args.from_timestamp is not None:
+        not_before = datetime.fromisoformat(args.from_timestamp).astimezone().timestamp()
+    elif hasattr(args, "last_days"):
         if args.last_days < 0:
             not_before = float(-1)
         elif args.last_days == 0:
@@ -701,9 +736,13 @@ def main():
         else:
             not_before = (datetime.now().astimezone() - timedelta(days=args.last_days)).timestamp()
     not_after = (
-        (datetime.now().astimezone() - timedelta(days=args.days_until)).timestamp()
-        if hasattr(args, "days_until") and args.days_until > 0
-        else float("inf")
+        datetime.fromisoformat(args.until_timestamp).astimezone().timestamp()
+        if hasattr(args, "until_timestamp") and args.until_timestamp is not None
+        else (
+            (datetime.now().astimezone() - timedelta(days=args.days_until)).timestamp()
+            if hasattr(args, "days_until") and args.days_until > 0
+            else float("inf")
+        )
     )
 
     if args.command == "login":
@@ -713,6 +752,20 @@ def main():
             store_credentials=args.store_credentials,
             waf_token=args.waf_token,
             v2=args.v2,
+            account=args.account,
+        )
+    elif args.command == "accounts":
+        print(
+            print_accounts(
+                login(
+                    phone_no=args.phone_no,
+                    pin=args.pin,
+                    store_credentials=args.store_credentials,
+                    waf_token=args.waf_token,
+                    v2=args.v2,
+                    account=args.account,
+                )
+            )
         )
     elif args.command == "portfolio":
         Portfolio(
@@ -722,6 +775,7 @@ def main():
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
                 v2=args.v2,
+                account=args.account,
             ),
             args.include_watchlist,
             instruments_to_ignore=re.split(r"[,;]", args.ignore) if args.ignore else [],
@@ -743,6 +797,7 @@ def main():
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
                 v2=args.v2,
+                account=args.account,
             ),
             isins,
             output=args.output,
@@ -759,6 +814,7 @@ def main():
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
                 v2=args.v2,
+                account=args.account,
             ),
             args.isin,
         ).get()
@@ -772,6 +828,7 @@ def main():
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
                 v2=args.v2,
+                account=args.account,
             ),
             args.output,
             args.format,
@@ -806,6 +863,7 @@ def main():
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
                 v2=args.v2,
+                account=args.account,
             ),
             args.outputdir,
             not_before,
@@ -841,6 +899,8 @@ def main():
                     pin=args.pin,
                     store_credentials=args.store_credentials,
                     waf_token=args.waf_token,
+                    v2=args.v2,
+                    account=args.account,
                 ),
                 args.input,
                 args.outputfile,
@@ -856,6 +916,8 @@ def main():
                     pin=args.pin,
                     store_credentials=args.store_credentials,
                     waf_token=args.waf_token,
+                    v2=args.v2,
+                    account=args.account,
                 ),
                 args.input,
                 args.inputfile,
@@ -993,6 +1055,7 @@ def main():
                 store_credentials=args.store_credentials,
                 waf_token=args.waf_token,
                 v2=args.v2,
+                account=args.account,
             ),
             args.outputfile,
             decimal_localization=args.decimal_localization,

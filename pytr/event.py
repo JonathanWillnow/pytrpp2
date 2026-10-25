@@ -237,6 +237,7 @@ events_known_ignored = [
     "TRADING_ORDER_EXPIRED",
     "TRADING_ORDER_REJECTED",
     "TRADING_SAVINGSPLAN_EXECUTION_FAILED",
+    "TRADING_SAVINGSPLAN_EXECUTION_PENDING",
     "VERIFICATION_TRANSFER_ACCEPTED",
     "YEAR_END_TAX_REPORT",
 ]
@@ -320,6 +321,7 @@ _swap_old_to_new_isin: dict[str, str] = {
     "DE0005785604": "DE000FRE5EN2",  # Fresenius SE ISIN change 2026-08
     "IE000BI8OT95": "LU1781541179",  # MSCI World USD (Acc) fund change
     "US4385161066": "US4385162056",  # Honeywell International reverse split 2026
+    "US8816242098": "IL0006290147",  # Teva ADR → Israeli ordinary share 2026-09
 }
 
 logger = None
@@ -505,7 +507,7 @@ class Event:
                     break
 
         # If still no event type, try to deduce it from the overview section
-        if event_type is None and uebersicht_dict:
+        if event_type is None and uebersicht_dict and eventTypeStr not in events_known_ignored:
             for item in uebersicht_dict.get("data", []):
                 ititle = item.get("title")
                 if ititle in ["Kartenzahlung", "Zahlung"]:
@@ -526,7 +528,7 @@ class Event:
                         event_type = PPEventType.DIVIDEND
 
         # If still no event type, try to deduce it from the sections
-        if event_type is None and sections:
+        if event_type is None and sections and eventTypeStr not in events_known_ignored:
             for item in sections:
                 ititle = item.get("title")
                 if ititle is None:

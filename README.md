@@ -155,6 +155,11 @@ Output:
 
 Authentication works the same as in pytr. See [pytr's README](https://github.com/pytr-org/pytr#authentication) for details on web login, app login, and the credentials file.
 
+Two upstream features are available on all login-based subcommands:
+
+- `--account` (and the `accounts` command) to use another account of your login, e.g. a company account. See [pytr's README](https://github.com/pytr-org/pytr#other-accounts-of-your-login).
+- If web login suddenly stops working, the environment variables `PYTR_TR_APP_VERSION`, `PYTR_TR_USER_AGENT` and `PYTR_TR_PLATFORM` override the values pinned in the package. See [pytr's README](https://github.com/pytr-org/pytr#if-web-login-suddenly-stops-working).
+
 
 ## Development
 
