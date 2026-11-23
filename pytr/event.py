@@ -88,6 +88,7 @@ tr_event_type_mapping = {
     "TAX_REFUND": PPEventType.TAX_REFUND,
     # Trade invoices
     "BENEFITS_SPARE_CHANGE_EXECUTION": ConditionalEventType.TRADE_INVOICE,
+    "IPO_SUBSCRIPTION_ALLOCATION": ConditionalEventType.TRADE_INVOICE,
     "IPO_TRADE_EXECUTED": ConditionalEventType.TRADE_INVOICE,
     "ORDER_EXECUTED": ConditionalEventType.TRADE_INVOICE,
     "SAVINGS_PLAN_EXECUTED": ConditionalEventType.TRADE_INVOICE,
@@ -202,6 +203,8 @@ events_known_ignored = [
     "GESH_CORPORATE_ACTION",
     "INPAYMENTS_SEPA_MANDATE_CREATED",
     "INSTRUCTION_CORPORATE_ACTION",
+    "IPO_SUBSCRIPTION_CANCELLED",
+    "IPO_SUBSCRIPTION_CREATED",
     "JUNIOR_ONBOARDING_GUARDIAN_B_CONSENT",
     "MATURITY",
     "NEW_TR_IBAN",
@@ -304,6 +307,7 @@ _note_to_isin: dict[str, str] = {
     "ORSTED A/S   -ANR-": "DK0064307839",
     "ORSTED A/S EM.09/25 DK 10": "DK0064307755",
     "ROCKET LAB CORP. O.N.": "US7731211089",
+    "tk accelis": "DE000TKCC1S8",
     "TKMS": "DE000TKMS001",
     "Unilever": "GB00BVZK7T90",
     "VERSANT MEDIA GRP A O.N.": "US9252831030",
@@ -412,7 +416,7 @@ class Event:
                 ititle = item.get("title")
                 if ititle == "Gesamt":
                     gesamt_dict = item
-                elif ititle == "Gebühr" and not fees_dict:
+                elif ititle in ["Gebühr", "Entgelt"] and not fees_dict:
                     fees_dict = item
                 elif ititle in ["Steuer", "Steuern"] and not taxes_dict:
                     taxes_dict = item
@@ -435,7 +439,7 @@ class Event:
                     for section in sections:
                         if section.get("type") == "table":
                             for subitem in section.get("data", []):
-                                if subitem.get("title") == "Aktien" and not shares_dict:
+                                if subitem.get("title") in ["Aktien", "Anteile"] and not shares_dict:
                                     shares_dict = subitem
                                 elif subitem.get("title") == "Quotation" and not quotation_dict:
                                     quotation_dict = subitem
